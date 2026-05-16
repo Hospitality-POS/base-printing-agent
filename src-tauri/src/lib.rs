@@ -96,6 +96,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_available_ports,
+            commands::discover_network_printers,
             commands::get_config,
             commands::get_agent_status,
             commands::pair_device,
