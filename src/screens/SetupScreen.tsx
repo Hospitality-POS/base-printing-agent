@@ -16,6 +16,8 @@ export default function SetupScreen({ onPaired }: Props) {
   const [printerPort, setPrinterPort] = useState("");
   const [printerHost, setPrinterHost] = useState("");
   const [printerNetworkPort, setPrinterNetworkPort] = useState("9100");
+  const [networkPrinters, setNetworkPrinters] = useState<string[]>([]);
+  const [scanning, setScanning] = useState(false);
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [testPrinting, setTestPrinting] = useState(false);
@@ -38,6 +40,25 @@ export default function SetupScreen({ onPaired }: Props) {
     }
   };
 
+  const scanNetworkPrinters = async () => {
+    setScanning(true);
+    setNetworkPrinters([]);
+    setError(null);
+    try {
+      const found = await invoke<string[]>("discover_network_printers");
+      setNetworkPrinters(found);
+      if (found.length > 0 && !printerHost) {
+        const first = found[0].split(" ")[0];
+        setPrinterHost(first);
+      }
+      if (found.length === 0) setError("No printers found on port 9100. Enter the IP manually.");
+    } catch (e) {
+      setError("Network scan failed: " + String(e));
+    } finally {
+      setScanning(false);
+    }
+  };
+
   useEffect(() => {
     loadPorts();
   }, []);
@@ -57,7 +78,12 @@ export default function SetupScreen({ onPaired }: Props) {
     setError(null);
     setSuccess(null);
     try {
-      await invoke("test_print");
+      await invoke("test_print", {
+        printerType,
+        printerPort: printerType === "serial" ? printerPort : null,
+        printerHost: printerType === "network" ? printerHost.trim() : null,
+        printerNetworkPort: printerType === "network" ? parseInt(printerNetworkPort) || 9100 : null,
+      });
       setSuccess("Test print sent successfully!");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -212,27 +238,83 @@ export default function SetupScreen({ onPaired }: Props) {
               />
             </Field>
           ) : (
-            <div className="space-y-2">
-              <Field label="Printer IP Address" required>
-                <input
-                  type="text"
-                  value={printerHost}
-                  onChange={(e) => setPrinterHost(e.target.value)}
-                  placeholder="e.g. 192.168.1.100"
-                  className="input-field"
-                />
-              </Field>
-              <Field label="TCP Port">
-                <input
-                  type="number"
-                  value={printerNetworkPort}
-                  onChange={(e) => setPrinterNetworkPort(e.target.value)}
-                  placeholder="9100"
-                  min={1}
-                  max={65535}
-                  className="input-field"
-                />
-                <p className="text-xs text-gray-600 mt-1">Default is 9100 (most Epson, Star, Bixolon network printers)</p>
+            <div className="space-y-3">
+              {/* Scan button */}
+              <button
+                type="button"
+                onClick={scanNetworkPrinters}
+                disabled={scanning}
+                className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {scanning ? (
+                  <>
+                    <div className="w-4 h-4 border border-green-400 border-t-transparent rounded-full animate-spin" />
+                    Scanning network for printers...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
+                    </svg>
+                    Scan Network for Printers
+                  </>
+                )}
+              </button>
+
+              {/* Discovered printers */}
+              {networkPrinters.length > 0 && (
+                <Field label="Discovered Printers" required>
+                  <div className="space-y-1.5">
+                    {networkPrinters.map((entry) => {
+                      const ip = entry.split(" ")[0];
+                      const selected = printerHost === ip;
+                      return (
+                        <button
+                          key={ip}
+                          type="button"
+                          onClick={() => setPrinterHost(ip)}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-sm transition-colors ${
+                            selected
+                              ? "bg-green-500/10 border-green-500/40 text-green-400"
+                              : "bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
+                            </svg>
+                            <span className="font-mono">{ip}</span>
+                          </div>
+                          <span className="text-xs text-gray-500">port 9100</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Field>
+              )}
+
+              {/* Manual fallback */}
+              <Field label={networkPrinters.length > 0 ? "Or Enter IP Manually" : "Printer IP Address"} required={networkPrinters.length === 0}>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={printerHost}
+                    onChange={(e) => setPrinterHost(e.target.value)}
+                    placeholder="e.g. 192.168.1.100"
+                    className="input-field flex-1"
+                  />
+                  <input
+                    type="number"
+                    value={printerNetworkPort}
+                    onChange={(e) => setPrinterNetworkPort(e.target.value)}
+                    placeholder="9100"
+                    min={1}
+                    max={65535}
+                    className="input-field w-24"
+                    title="TCP port (default 9100)"
+                  />
+                </div>
+                <p className="text-xs text-gray-600 mt-1">IP : Port — default port 9100 (Epson, Star, Bixolon)</p>
               </Field>
             </div>
           )}
