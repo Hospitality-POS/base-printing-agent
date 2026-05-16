@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Build Installers (Windows + macOS)
 
 on:
   push:
@@ -60,3 +60,79 @@ jobs:
           releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
           prerelease: false
           args: --target x86_64-pc-windows-msvc
+
+  build-macos-arm:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app (macOS Apple Silicon)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://your-saas.com' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "PrintAgent ${{ github.ref_name }}"
+          releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
+          prerelease: false
+          args: --target aarch64-apple-darwin
+
+  build-macos-intel:
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app (macOS Intel)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://your-saas.com' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "PrintAgent ${{ github.ref_name }}"
+          releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
+          prerelease: false
+          args: --target x86_64-apple-darwin
