@@ -6,32 +6,64 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      release_draft:
-        description: "Create a draft release"
-        required: false
-        default: "true"
+      tag_name:
+        description: "Release tag (e.g. v0.2.0)"
+        required: true
+        default: "v0.1.0"
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-
+  # ── Step 1: create the GitHub Release once ────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+      tag: ${{ steps.resolve-tag.outputs.tag }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Resolve tag name
+        id: resolve-tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = "${{ steps.resolve-tag.outputs.tag }}";
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `PrintAgent ${tag}`,
+              body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| macOS Apple Silicon | \`PrintAgent_*.aarch64.dmg\` |\n| macOS Intel | \`PrintAgent_*.x64.dmg\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, Branch ID, Zone and select your printer\n3. Click **Pair Device**`,
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  # ── Step 2: build all three platforms in parallel ─────────────────────────
+  build-windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
 
@@ -42,45 +74,27 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://your-saas.com' }}
+          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://api.hospitality.reliatech.co.ke' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "PrintAgent ${{ github.ref_name }}"
-          releaseBody: |
-            ## PrintAgent ${{ github.ref_name }}
-
-            ### Installation (Windows)
-            - **NSIS installer** (recommended): `PrintAgent_x.x.x_x64-setup.exe` — standard installer wizard
-            - **MSI package**: `PrintAgent_x.x.x_x64_en-US.msi` — for enterprise/GPO deployment
-
-            ### First run
-            1. Launch PrintAgent — it will appear in the system tray
-            2. Enter your Company Code, Branch ID, Zone, and select a printer port
-            3. Click **Pair Device**
-          releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target x86_64-pc-windows-msvc
 
   build-macos-arm:
+    needs: create-release
     runs-on: macos-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
 
@@ -91,34 +105,27 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://your-saas.com' }}
+          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://api.hospitality.reliatech.co.ke' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "PrintAgent ${{ github.ref_name }}"
-          releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target aarch64-apple-darwin
 
   build-macos-intel:
+    needs: create-release
     runs-on: macos-13
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
 
@@ -129,10 +136,23 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://your-saas.com' }}
+          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://api.hospitality.reliatech.co.ke' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "PrintAgent ${{ github.ref_name }}"
-          releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target x86_64-apple-darwin
+
+  # ── Step 3: publish the draft once all builds are attached ─────────────────
+  publish-release:
+    needs: [create-release, build-windows, build-macos-arm, build-macos-intel]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+            });
