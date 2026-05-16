@@ -3,6 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
+fn default_printer_type() -> String {
+    "serial".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -15,6 +19,12 @@ pub struct Config {
     pub printer_port: String,
     pub paper_width: u32,
     pub ws_url: String,
+    #[serde(default = "default_printer_type")]
+    pub printer_type: String,
+    #[serde(default)]
+    pub printer_host: Option<String>,
+    #[serde(default)]
+    pub printer_network_port: Option<u16>,
 }
 
 impl Default for Config {
@@ -29,6 +39,9 @@ impl Default for Config {
             printer_port: String::new(),
             paper_width: 80,
             ws_url: "wss://your-saas.com/ws/agent".to_string(),
+            printer_type: "serial".to_string(),
+            printer_host: None,
+            printer_network_port: None,
         }
     }
 }

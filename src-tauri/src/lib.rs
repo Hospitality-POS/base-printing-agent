@@ -54,6 +54,8 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &Config) {
     };
     drop(pool_lock);
 
+    let printer_target = printer::PrintTarget::from_config(cfg);
+
     tokio::spawn(ws_client::run_ws_loop(
         Arc::clone(&state),
         pool,
@@ -62,7 +64,7 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &Config) {
         cfg.agent_id.clone(),
         cfg.zone.clone(),
         cfg.branch_id.clone(),
-        cfg.printer_port.clone(),
+        printer_target,
     ));
 }
 
@@ -198,9 +200,9 @@ fn setup_tray(app_handle: &tauri::AppHandle) {
                     let state = app.state::<Arc<AppState>>();
                     let cfg_lock = state.current_config.lock().await;
                     if let Some(cfg) = cfg_lock.as_ref() {
-                        let port = cfg.printer_port.clone();
+                        let target = printer::PrintTarget::from_config(cfg);
                         drop(cfg_lock);
-                        if let Err(e) = crate::printer::test_print(&port) {
+                        if let Err(e) = printer::test_print(&target) {
                             log::error!("Tray test print failed: {}", e);
                         }
                     }

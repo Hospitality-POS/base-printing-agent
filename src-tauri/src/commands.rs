@@ -86,6 +86,9 @@ pub async fn pair_device(
     zone: String,
     device_name: String,
     printer_port: String,
+    printer_type: String,
+    printer_host: Option<String>,
+    printer_network_port: Option<u16>,
 ) -> Result<(), String> {
     let api_base = std::env::var("PRINT_AGENT_API_URL")
         .unwrap_or_else(|_| "https://your-saas.com".to_string());
@@ -128,6 +131,9 @@ pub async fn pair_device(
         printer_port,
         paper_width: 80,
         ws_url: pair_resp.ws_url,
+        printer_type,
+        printer_host,
+        printer_network_port,
     };
 
     config::save_config(&app_handle, &new_config)?;
@@ -147,18 +153,17 @@ pub async fn test_print(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let cfg_lock = state.current_config.lock().await;
-    let port = match cfg_lock.as_ref() {
-        Some(c) if !c.printer_port.is_empty() => c.printer_port.clone(),
-        _ => {
-            drop(cfg_lock);
-            config::load_config(&app_handle)
-                .and_then(|c| if c.printer_port.is_empty() { None } else { Some(c.printer_port) })
-                .ok_or_else(|| "No printer port configured".to_string())?
-        }
+    let cfg = {
+        let cfg_lock = state.current_config.lock().await;
+        cfg_lock.clone()
     };
-
-    printer::test_print(&port)
+    let cfg = match cfg {
+        Some(c) => c,
+        None => config::load_config(&app_handle)
+            .ok_or_else(|| "No printer configured".to_string())?,
+    };
+    let target = printer::PrintTarget::from_config(&cfg);
+    printer::test_print(&target)
 }
 
 #[tauri::command]

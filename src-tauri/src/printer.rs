@@ -7,6 +7,32 @@ const ESC: u8 = 0x1B;
 const GS: u8 = 0x1D;
 const LF: u8 = 0x0A;
 
+#[derive(Debug, Clone)]
+pub enum PrintTarget {
+    Serial(String),
+    Network { host: String, port: u16 },
+}
+
+impl PrintTarget {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        if config.printer_type == "network" {
+            PrintTarget::Network {
+                host: config.printer_host.clone().unwrap_or_default(),
+                port: config.printer_network_port.unwrap_or(9100),
+            }
+        } else {
+            PrintTarget::Serial(config.printer_port.clone())
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            PrintTarget::Serial(p) => p.clone(),
+            PrintTarget::Network { host, port } => format!("{}:{}", host, port),
+        }
+    }
+}
+
 pub fn get_available_ports() -> Vec<String> {
     match serialport::available_ports() {
         Ok(ports) => ports.into_iter().map(|p| p.port_name).collect(),
@@ -21,28 +47,35 @@ fn open_serial_port(port_name: &str) -> Result<Box<dyn SerialPort>, String> {
         .map_err(|e| format!("Failed to open port {}: {}", port_name, e))
 }
 
-pub fn print_job(job: &PrintJob, port_name: &str) -> Result<(), String> {
+pub fn print_job(job: &PrintJob, target: &PrintTarget) -> Result<(), String> {
     let bytes = format_receipt(job);
-    write_bytes(port_name, &bytes)
+    write_bytes(target, &bytes)
 }
 
-pub fn test_print(port_name: &str) -> Result<(), String> {
+pub fn test_print(target: &PrintTarget) -> Result<(), String> {
     let mut bytes = Vec::new();
     initialize_printer(&mut bytes);
     add_text_bold(&mut bytes, "  ** TEST PRINT **\n");
     add_text(&mut bytes, "PrintAgent v0.1.0\n");
     add_divider(&mut bytes);
-    add_text(&mut bytes, "Port: ");
-    add_text(&mut bytes, port_name);
+    add_text(&mut bytes, "Printer: ");
+    add_text(&mut bytes, &target.display());
     add_text(&mut bytes, "\n");
     add_text(&mut bytes, "Status: OK\n");
     add_divider(&mut bytes);
     add_feed(&mut bytes, 3);
     cut_paper(&mut bytes);
-    write_bytes(port_name, &bytes)
+    write_bytes(target, &bytes)
 }
 
-fn write_bytes(port_name: &str, bytes: &[u8]) -> Result<(), String> {
+fn write_bytes(target: &PrintTarget, bytes: &[u8]) -> Result<(), String> {
+    match target {
+        PrintTarget::Serial(port_name) => write_to_serial(port_name, bytes),
+        PrintTarget::Network { host, port } => write_to_network(host, *port, bytes),
+    }
+}
+
+fn write_to_serial(port_name: &str, bytes: &[u8]) -> Result<(), String> {
     if port_name.starts_with("/dev/usb/") || port_name.starts_with("/dev/lp") {
         use std::fs::OpenOptions;
         let mut file = OpenOptions::new()
@@ -56,6 +89,20 @@ fn write_bytes(port_name: &str, bytes: &[u8]) -> Result<(), String> {
         port.write_all(bytes)
             .map_err(|e| format!("Failed to write to port: {}", e))?;
     }
+    Ok(())
+}
+
+fn write_to_network(host: &str, port: u16, bytes: &[u8]) -> Result<(), String> {
+    use std::net::TcpStream;
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(&addr)
+        .map_err(|e| format!("Cannot connect to printer at {} → {}", addr, e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok();
+    stream
+        .write_all(bytes)
+        .map_err(|e| format!("Failed to write to network printer {}: {}", addr, e))?;
     Ok(())
 }
 

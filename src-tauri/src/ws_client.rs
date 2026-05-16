@@ -1,5 +1,6 @@
 use crate::job_handler;
 use crate::job_queue::PrintJob;
+use crate::printer::PrintTarget;
 use crate::AppState;
 use futures_util::{SinkExt, StreamExt};
 use sqlx::SqlitePool;
@@ -17,7 +18,7 @@ pub async fn run_ws_loop(
     agent_id: String,
     zone: String,
     branch_id: String,
-    printer_port: String,
+    printer_target: PrintTarget,
 ) {
     loop {
         log::info!("Connecting to WebSocket at {}", ws_url);
@@ -58,7 +59,7 @@ pub async fn run_ws_loop(
 
                 log::info!("Auth message sent.");
 
-                job_handler::drain_pending_queue(&pool, &printer_port, Arc::clone(&state), &agent_id).await;
+                job_handler::drain_pending_queue(&pool, &printer_target, Arc::clone(&state), &agent_id).await;
 
                 let write = Arc::new(Mutex::new(write));
                 let write_clone = Arc::clone(&write);
@@ -76,7 +77,7 @@ pub async fn run_ws_loop(
                 let inbound_result = handle_inbound(
                     &mut read,
                     &pool,
-                    &printer_port,
+                    &printer_target,
                     &agent_id,
                     &zone,
                     Arc::clone(&state),
@@ -105,7 +106,7 @@ pub async fn run_ws_loop(
 async fn handle_inbound<S>(
     read: &mut S,
     pool: &SqlitePool,
-    printer_port: &str,
+    printer_target: &PrintTarget,
     agent_id: &str,
     zone: &str,
     state: Arc<AppState>,
@@ -116,7 +117,7 @@ where
     while let Some(msg_result) = read.next().await {
         match msg_result {
             Ok(Message::Text(text)) => {
-                handle_message(&text, pool, printer_port, agent_id, zone, Arc::clone(&state)).await;
+                handle_message(&text, pool, printer_target, agent_id, zone, Arc::clone(&state)).await;
             }
             Ok(Message::Ping(_)) => {
                 send_via_state(&state, r#"{"type":"pong"}"#.to_string()).await;
@@ -136,7 +137,7 @@ where
 async fn handle_message(
     text: &str,
     pool: &SqlitePool,
-    printer_port: &str,
+    printer_target: &PrintTarget,
     agent_id: &str,
     zone: &str,
     state: Arc<AppState>,
@@ -169,7 +170,7 @@ async fn handle_message(
                         job_handler::handle_print_job(
                             job,
                             pool,
-                            printer_port,
+                            printer_target,
                             Arc::clone(&state),
                             agent_id,
                         )

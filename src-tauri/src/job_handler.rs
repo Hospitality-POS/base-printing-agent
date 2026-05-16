@@ -1,5 +1,5 @@
 use crate::job_queue::{self, PrintJob};
-use crate::printer;
+use crate::printer::{self, PrintTarget};
 use crate::AppState;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 pub async fn handle_print_job(
     job: PrintJob,
     pool: &SqlitePool,
-    printer_port: &str,
+    target: &PrintTarget,
     state: Arc<AppState>,
     agent_id: &str,
 ) {
@@ -21,9 +21,9 @@ pub async fn handle_print_job(
         return;
     }
 
-    let status = match printer::print_job(&job, printer_port) {
+    let status = match printer::print_job(&job, target) {
         Ok(_) => {
-            log::info!("Job {} printed successfully.", job.job_id);
+            log::info!("Job {} printed to {} successfully.", job.job_id, target.display());
             let _ = job_queue::mark_printed(pool, &job.job_id).await;
             "printed"
         }
@@ -50,7 +50,7 @@ pub async fn handle_print_job(
 
 pub async fn drain_pending_queue(
     pool: &SqlitePool,
-    printer_port: &str,
+    target: &PrintTarget,
     state: Arc<AppState>,
     agent_id: &str,
 ) {
@@ -59,7 +59,7 @@ pub async fn drain_pending_queue(
         log::info!("Draining {} pending jobs from queue...", pending.len());
     }
     for job in pending {
-        handle_print_job(job, pool, printer_port, Arc::clone(&state), agent_id).await;
+        handle_print_job(job, pool, target, Arc::clone(&state), agent_id).await;
     }
 }
 

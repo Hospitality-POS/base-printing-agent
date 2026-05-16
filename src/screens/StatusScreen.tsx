@@ -44,12 +44,7 @@ export default function StatusScreen({ onUnpair }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-green-500/10 border border-green-500/20 rounded-xl flex items-center justify-center">
-            <svg className="w-5 h-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
-            </svg>
-          </div>
+          <img src="/logo.png" alt="Base" className="h-7 w-auto" />
           <div>
             <h1 className="text-sm font-semibold text-white">PrintAgent</h1>
             <p className="text-xs text-gray-500">Silent Print Routing</p>

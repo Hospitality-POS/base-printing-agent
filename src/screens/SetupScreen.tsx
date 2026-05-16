@@ -5,12 +5,17 @@ interface Props {
   onPaired: () => void;
 }
 
+type PrinterType = "serial" | "network";
+
 export default function SetupScreen({ onPaired }: Props) {
   const [companyCode, setCompanyCode] = useState("");
   const [branchId, setBranchId] = useState("");
   const [zone, setZone] = useState("");
   const [deviceName, setDeviceName] = useState("");
+  const [printerType, setPrinterType] = useState<PrinterType>("serial");
   const [printerPort, setPrinterPort] = useState("");
+  const [printerHost, setPrinterHost] = useState("");
+  const [printerNetworkPort, setPrinterNetworkPort] = useState("9100");
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [testPrinting, setTestPrinting] = useState(false);
@@ -37,9 +42,15 @@ export default function SetupScreen({ onPaired }: Props) {
     loadPorts();
   }, []);
 
+  const printerReady = printerType === "network"
+    ? printerHost.trim().length > 0
+    : printerPort.length > 0;
+
   const handleTestPrint = async () => {
-    if (!printerPort) {
-      setError("Please select a printer port first.");
+    if (!printerReady) {
+      setError(printerType === "network"
+        ? "Enter a printer IP address first."
+        : "Please select a printer port first.");
       return;
     }
     setTestPrinting(true);
@@ -56,8 +67,14 @@ export default function SetupScreen({ onPaired }: Props) {
   };
 
   const handlePair = async () => {
-    if (!companyCode.trim() || !branchId.trim() || !zone.trim() || !deviceName.trim() || !printerPort) {
+    if (!companyCode.trim() || !branchId.trim() || !zone.trim() || !deviceName.trim()) {
       setError("All fields are required.");
+      return;
+    }
+    if (!printerReady) {
+      setError(printerType === "network"
+        ? "Enter a printer IP address."
+        : "Select a printer port.");
       return;
     }
     setLoading(true);
@@ -69,7 +86,10 @@ export default function SetupScreen({ onPaired }: Props) {
         branchId: branchId.trim(),
         zone: zone.trim(),
         deviceName: deviceName.trim(),
-        printerPort,
+        printerPort: printerType === "serial" ? printerPort : "",
+        printerType,
+        printerHost: printerType === "network" ? printerHost.trim() : null,
+        printerNetworkPort: printerType === "network" ? parseInt(printerNetworkPort) || 9100 : null,
       });
       setSuccess("Device paired successfully!");
       setTimeout(onPaired, 800);
@@ -85,11 +105,8 @@ export default function SetupScreen({ onPaired }: Props) {
       <div className="w-full max-w-md">
         {/* Header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-green-500/10 border border-green-500/20 rounded-2xl mb-4">
-            <svg className="w-7 h-7 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
-            </svg>
+          <div className="inline-flex items-center justify-center mb-4">
+            <img src="/logo.png" alt="Base" className="h-12 w-auto" />
           </div>
           <h1 className="text-2xl font-semibold text-white">PrintAgent Setup</h1>
           <p className="text-gray-400 text-sm mt-1">Configure this device to connect to your print network</p>
@@ -138,40 +155,92 @@ export default function SetupScreen({ onPaired }: Props) {
             </Field>
           </div>
 
-          <Field label="Printer Port" required>
-            <div className="flex gap-2">
-              <select
-                value={printerPort}
-                onChange={(e) => setPrinterPort(e.target.value)}
-                className="input-field flex-1"
-              >
-                {portsLoading ? (
-                  <option value="">Loading ports...</option>
-                ) : availablePorts.length === 0 ? (
-                  <option value="">No ports found</option>
-                ) : (
-                  availablePorts.map((p) => (
-                    <option key={p} value={p}>{p}</option>
-                  ))
-                )}
-              </select>
-              <button
-                onClick={loadPorts}
-                disabled={portsLoading}
-                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm transition-colors disabled:opacity-50"
-                title="Refresh ports"
-              >
-                <svg className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
+          {/* Printer Connection Type Toggle */}
+          <Field label="Printer Connection" required>
+            <div className="flex rounded-lg border border-gray-700 overflow-hidden">
+              {(["serial", "network"] as PrinterType[]).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setPrinterType(t)}
+                  className={`flex-1 py-2 text-sm font-medium transition-colors ${
+                    printerType === t
+                      ? "bg-green-600 text-white"
+                      : "bg-gray-800 text-gray-400 hover:text-gray-200"
+                  }`}
+                >
+                  {t === "serial" ? "USB / Serial" : "Network (TCP/IP)"}
+                </button>
+              ))}
             </div>
           </Field>
+
+          {printerType === "serial" ? (
+            <Field label="Printer Port" required>
+              <div className="flex gap-2">
+                <select
+                  value={printerPort}
+                  onChange={(e) => setPrinterPort(e.target.value)}
+                  className="input-field flex-1"
+                >
+                  {portsLoading ? (
+                    <option value="">Loading ports...</option>
+                  ) : availablePorts.length === 0 ? (
+                    <option value="">No ports found — type manually below</option>
+                  ) : (
+                    availablePorts.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))
+                  )}
+                </select>
+                <button
+                  onClick={loadPorts}
+                  disabled={portsLoading}
+                  className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm transition-colors disabled:opacity-50"
+                  title="Refresh ports"
+                >
+                  <svg className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
+              <input
+                type="text"
+                value={printerPort}
+                onChange={(e) => setPrinterPort(e.target.value)}
+                placeholder="Or type manually, e.g. COM3 or /dev/usb/lp0"
+                className="input-field mt-2"
+              />
+            </Field>
+          ) : (
+            <div className="space-y-2">
+              <Field label="Printer IP Address" required>
+                <input
+                  type="text"
+                  value={printerHost}
+                  onChange={(e) => setPrinterHost(e.target.value)}
+                  placeholder="e.g. 192.168.1.100"
+                  className="input-field"
+                />
+              </Field>
+              <Field label="TCP Port">
+                <input
+                  type="number"
+                  value={printerNetworkPort}
+                  onChange={(e) => setPrinterNetworkPort(e.target.value)}
+                  placeholder="9100"
+                  min={1}
+                  max={65535}
+                  className="input-field"
+                />
+                <p className="text-xs text-gray-600 mt-1">Default is 9100 (most Epson, Star, Bixolon network printers)</p>
+              </Field>
+            </div>
+          )}
 
           {/* Test Print */}
           <button
             onClick={handleTestPrint}
-            disabled={!printerPort || testPrinting}
+            disabled={!printerReady || testPrinting}
             className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
           >
             {testPrinting ? (
