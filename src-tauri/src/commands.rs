@@ -32,6 +32,11 @@ pub fn get_available_ports() -> Vec<String> {
 }
 
 #[tauri::command]
+pub async fn discover_network_printers() -> Vec<String> {
+    printer::discover_network_printers().await
+}
+
+#[tauri::command]
 pub fn get_config(app_handle: tauri::AppHandle) -> Option<Config> {
     config::load_config(&app_handle)
 }
@@ -152,17 +157,40 @@ pub async fn pair_device(
 pub async fn test_print(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
+    printer_type: Option<String>,
+    printer_port: Option<String>,
+    printer_host: Option<String>,
+    printer_network_port: Option<u16>,
 ) -> Result<(), String> {
-    let cfg = {
-        let cfg_lock = state.current_config.lock().await;
-        cfg_lock.clone()
+    let target = if let Some(pt) = printer_type {
+        if pt == "network" {
+            let host = printer_host.unwrap_or_default();
+            if host.is_empty() {
+                return Err("Printer IP address is required".to_string());
+            }
+            printer::PrintTarget::Network {
+                host,
+                port: printer_network_port.unwrap_or(9100),
+            }
+        } else {
+            let port = printer_port.unwrap_or_default();
+            if port.is_empty() {
+                return Err("Printer port is required".to_string());
+            }
+            printer::PrintTarget::Serial(port)
+        }
+    } else {
+        let cfg = {
+            let cfg_lock = state.current_config.lock().await;
+            cfg_lock.clone()
+        };
+        let cfg = match cfg {
+            Some(c) => c,
+            None => config::load_config(&app_handle)
+                .ok_or_else(|| "No printer configured".to_string())?,
+        };
+        printer::PrintTarget::from_config(&cfg)
     };
-    let cfg = match cfg {
-        Some(c) => c,
-        None => config::load_config(&app_handle)
-            .ok_or_else(|| "No printer configured".to_string())?,
-    };
-    let target = printer::PrintTarget::from_config(&cfg);
     printer::test_print(&target)
 }
 
