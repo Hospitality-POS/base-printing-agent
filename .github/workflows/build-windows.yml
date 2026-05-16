@@ -1,0 +1,62 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_draft:
+        description: "Create a draft release"
+        required: false
+        default: "true"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://your-saas.com' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "PrintAgent ${{ github.ref_name }}"
+          releaseBody: |
+            ## PrintAgent ${{ github.ref_name }}
+
+            ### Installation (Windows)
+            - **NSIS installer** (recommended): `PrintAgent_x.x.x_x64-setup.exe` — standard installer wizard
+            - **MSI package**: `PrintAgent_x.x.x_x64_en-US.msi` — for enterprise/GPO deployment
+
+            ### First run
+            1. Launch PrintAgent — it will appear in the system tray
+            2. Enter your Company Code, Branch ID, Zone, and select a printer port
+            3. Click **Pair Device**
+          releaseDraft: ${{ github.event.inputs.release_draft != 'false' }}
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc
