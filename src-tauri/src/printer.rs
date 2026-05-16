@@ -40,6 +40,56 @@ pub fn get_available_ports() -> Vec<String> {
     }
 }
 
+fn get_local_ip() -> String {
+    use std::net::UdpSocket;
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
+    }
+    "192.168.1.1".to_string()
+}
+
+pub async fn discover_network_printers() -> Vec<String> {
+    let local_ip = get_local_ip();
+    let parts: Vec<&str> = local_ip.split('.').collect();
+    if parts.len() != 4 {
+        return vec![];
+    }
+    let base = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    log::info!("Scanning subnet {}.1-254 on port 9100...", base);
+
+    let mut handles = Vec::new();
+    for i in 1u8..=254 {
+        let ip = format!("{}.{}", base, i);
+        let handle = tokio::spawn(async move {
+            let addr = format!("{}:9100", ip);
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(_)) => Some(format!("{} (port 9100)", ip)),
+                _ => None,
+            }
+        });
+        handles.push(handle);
+    }
+
+    let mut found = Vec::new();
+    for handle in handles {
+        if let Ok(Some(entry)) = handle.await {
+            found.push(entry);
+        }
+    }
+    found.sort();
+    log::info!("Network printer scan complete: {} found.", found.len());
+    found
+}
+
 fn open_serial_port(port_name: &str) -> Result<Box<dyn SerialPort>, String> {
     serialport::new(port_name, 9600)
         .timeout(Duration::from_secs(5))
