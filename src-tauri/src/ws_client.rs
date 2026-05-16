@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 pub async fn run_ws_loop(
@@ -57,7 +57,52 @@ pub async fn run_ws_loop(
                     continue;
                 }
 
-                log::info!("Auth message sent.");
+                log::info!("Auth message sent. Waiting for auth_ok...");
+
+                // Wait up to 5 s for auth_ok from server
+                let auth_reply = timeout(Duration::from_secs(5), read.next()).await;
+                match auth_reply {
+                    Ok(Some(Ok(Message::Text(text)))) => {
+                        let val: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                        match val.get("type").and_then(|t| t.as_str()) {
+                            Some("auth_ok") => {
+                                log::info!("WebSocket authenticated successfully.");
+                            }
+                            Some("auth_error") => {
+                                let msg = val.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                                log::error!("Server rejected auth: {}. Re-pairing required.", msg);
+                                set_disconnected(&state).await;
+                                // Back off for 60 s — bad token won't fix itself on retry
+                                sleep(Duration::from_secs(60)).await;
+                                continue;
+                            }
+                            _ => {
+                                log::warn!("Expected auth_ok, got: {}", text);
+                                set_disconnected(&state).await;
+                                sleep(Duration::from_secs(3)).await;
+                                continue;
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) => {
+                        log::warn!("Connection error during auth handshake: {}", e);
+                        set_disconnected(&state).await;
+                        sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                    Ok(None) | Err(_) => {
+                        log::warn!("Auth timeout — no auth_ok received within 5 s.");
+                        set_disconnected(&state).await;
+                        sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                    _ => {
+                        log::warn!("Unexpected message during auth handshake.");
+                        set_disconnected(&state).await;
+                        sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                }
 
                 job_handler::drain_pending_queue(&pool, &printer_target, Arc::clone(&state), &agent_id).await;
 
@@ -114,7 +159,13 @@ async fn handle_inbound<S>(
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    while let Some(msg_result) = read.next().await {
+    while let Some(msg_result) = {
+        // 90 s idle timeout — reconnect if server goes silent
+        match timeout(Duration::from_secs(90), read.next()).await {
+            Ok(item) => item,
+            Err(_) => return Err("90 s idle timeout — no message received".to_string()),
+        }
+    } {
         match msg_result {
             Ok(Message::Text(text)) => {
                 handle_message(&text, pool, printer_target, agent_id, zone, Arc::clone(&state)).await;
