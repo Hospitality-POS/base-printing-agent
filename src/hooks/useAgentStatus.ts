@@ -1,42 +1,35 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-export interface AgentStatus {
+interface AgentStatus {
+  agentId: string;
   wsConnected: boolean;
   zone: string;
   branchId: string;
-  lastJobId: string | null;
-  lastJobTime: string | null;
+  deviceName: string;
   queueCount: number;
 }
 
 export function useAgentStatus() {
-  const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [statuses, setStatuses] = useState<AgentStatus[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let active = true;
-
-    const poll = async () => {
+    const fetchStatus = async () => {
       try {
-        const s = await invoke<AgentStatus>("get_agent_status");
-        if (active) {
-          setStatus(s);
-          setLoading(false);
-        }
-      } catch {
-        if (active) setLoading(false);
+        const result = await invoke<AgentStatus[]>("get_agent_status");
+        setStatuses(result);
+      } catch (e) {
+        console.error("Failed to fetch agent status:", e);
+      } finally {
+        setLoading(false);
       }
     };
 
-    poll();
-    const interval = setInterval(poll, 2000);
-
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 2000);
+    return () => clearInterval(interval);
   }, []);
 
-  return { status, loading };
+  return { statuses, loading };
 }

@@ -9,11 +9,11 @@ use tauri::State;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
+    pub agent_id: String,
     pub ws_connected: bool,
     pub zone: String,
     pub branch_id: String,
-    pub last_job_id: Option<String>,
-    pub last_job_time: Option<String>,
+    pub device_name: String,
     pub queue_count: i64,
 }
 
@@ -37,49 +37,40 @@ pub async fn discover_network_printers() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn get_config(app_handle: tauri::AppHandle) -> Option<Config> {
-    config::load_config(&app_handle)
+pub fn get_config(app_handle: tauri::AppHandle) -> Config {
+    config::load_config(&app_handle).unwrap_or_default()
 }
 
 #[tauri::command]
 pub async fn get_agent_status(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
-) -> Result<AgentStatus, String> {
-    let cfg = config::load_config(&app_handle);
+) -> Result<Vec<AgentStatus>, String> {
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+    let connections = state.agent_connections.lock().await;
+    let pool_lock = state.db_pool.lock().await;
+    let pool = pool_lock.as_ref().ok_or("DB pool not initialized")?;
 
-    let ws_connected = {
-        let lock = state.ws_connected.lock().map_err(|e| e.to_string())?;
-        *lock
-    };
+    let mut statuses = Vec::new();
+    for agent in &cfg.agents {
+        let ws_connected = connections
+            .get(&agent.agent_id)
+            .map(|c| c.connected)
+            .unwrap_or(false);
 
-    let last_job_id = {
-        let lock = state.last_job_id.lock().map_err(|e| e.to_string())?;
-        lock.clone()
-    };
+        let queue_count = job_queue::get_pending_count_for_agent(pool, &agent.agent_id).await.unwrap_or(0);
 
-    let last_job_time = {
-        let lock = state.last_job_time.lock().map_err(|e| e.to_string())?;
-        lock.clone()
-    };
+        statuses.push(AgentStatus {
+            agent_id: agent.agent_id.clone(),
+            ws_connected,
+            zone: agent.zone.clone(),
+            branch_id: agent.branch_id.clone(),
+            device_name: agent.device_name.clone(),
+            queue_count,
+        });
+    }
 
-    let pool_opt = {
-        let pool_lock = state.db_pool.lock().await;
-        pool_lock.as_ref().map(|p| p.clone())
-    };
-    let queue_count = match pool_opt {
-        Some(pool) => job_queue::get_pending_count(&pool).await,
-        None => 0,
-    };
-
-    Ok(AgentStatus {
-        ws_connected,
-        zone: cfg.as_ref().map(|c| c.zone.clone()).unwrap_or_default(),
-        branch_id: cfg.as_ref().map(|c| c.branch_id.clone()).unwrap_or_default(),
-        last_job_id,
-        last_job_time,
-        queue_count,
-    })
+    Ok(statuses)
 }
 
 #[tauri::command]
@@ -96,7 +87,7 @@ pub async fn pair_device(
     printer_network_port: Option<u16>,
 ) -> Result<(), String> {
     let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://your-saas.com".to_string());
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
 
     let client = reqwest::Client::new();
 
@@ -126,9 +117,10 @@ pub async fn pair_device(
         .await
         .map_err(|e| format!("Failed to parse pairing response: {}", e))?;
 
-    let new_config = Config {
+    let new_agent = config::AgentConfig {
         agent_id: pair_resp.agent_id,
         company_id: pair_resp.company_id,
+        company_code: company_code.clone(),
         branch_id,
         zone,
         device_name,
@@ -141,14 +133,11 @@ pub async fn pair_device(
         printer_network_port,
     };
 
-    config::save_config(&app_handle, &new_config)?;
+    config::add_agent(&app_handle, new_agent)?;
 
-    {
-        let mut cfg_lock = state.current_config.lock().await;
-        *cfg_lock = Some(new_config.clone());
-    }
-
-    start_ws_loop(state.inner().clone(), &new_config).await;
+    log::info!("Agent added, starting WebSocket loop for all agents...");
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+    start_ws_loop(state.inner().clone(), &cfg).await;
 
     Ok(())
 }
@@ -156,41 +145,37 @@ pub async fn pair_device(
 #[tauri::command]
 pub async fn test_print(
     app_handle: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
+    _state: State<'_, Arc<AppState>>,
+    agent_id: Option<String>,
     printer_type: Option<String>,
     printer_port: Option<String>,
     printer_host: Option<String>,
     printer_network_port: Option<u16>,
 ) -> Result<(), String> {
-    let target = if let Some(pt) = printer_type {
-        if pt == "network" {
-            let host = printer_host.unwrap_or_default();
-            if host.is_empty() {
-                return Err("Printer IP address is required".to_string());
-            }
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+
+    let target = if let Some(aid) = agent_id {
+        let agent = cfg.agents.iter().find(|a| a.agent_id == aid)
+            .ok_or_else(|| format!("Agent {} not found", aid))?;
+        printer::PrintTarget::from_agent_config(agent)
+    } else if !cfg.agents.is_empty() {
+        printer::PrintTarget::from_agent_config(&cfg.agents[0])
+    } else {
+        let printer_type = printer_type.unwrap_or_else(|| "serial".to_string());
+        let printer_port = printer_port.unwrap_or_default();
+        let printer_host = printer_host.unwrap_or_default();
+        let printer_network_port = printer_network_port.unwrap_or(9100);
+        
+        if printer_type == "network" {
             printer::PrintTarget::Network {
-                host,
-                port: printer_network_port.unwrap_or(9100),
+                host: printer_host,
+                port: printer_network_port,
             }
         } else {
-            let port = printer_port.unwrap_or_default();
-            if port.is_empty() {
-                return Err("Printer port is required".to_string());
-            }
-            printer::PrintTarget::Serial(port)
+            printer::PrintTarget::Serial(printer_port)
         }
-    } else {
-        let cfg = {
-            let cfg_lock = state.current_config.lock().await;
-            cfg_lock.clone()
-        };
-        let cfg = match cfg {
-            Some(c) => c,
-            None => config::load_config(&app_handle)
-                .ok_or_else(|| "No printer configured".to_string())?,
-        };
-        printer::PrintTarget::from_config(&cfg)
     };
+    
     printer::test_print(&target)
 }
 
@@ -198,14 +183,17 @@ pub async fn test_print(
 pub async fn unpair_device(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
+    agent_id: String,
 ) -> Result<(), String> {
-    config::delete_config(&app_handle)?;
+    config::remove_agent(&app_handle, &agent_id)?;
 
-    let mut cfg_lock = state.current_config.lock().await;
-    *cfg_lock = None;
+    let mut connections = state.agent_connections.lock().await;
+    connections.remove(&agent_id);
 
-    let mut connected = state.ws_connected.lock().map_err(|e| e.to_string())?;
-    *connected = false;
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+    if cfg.agents.is_empty() {
+        config::delete_config(&app_handle)?;
+    }
 
     Ok(())
 }

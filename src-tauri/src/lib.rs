@@ -5,44 +5,36 @@ pub mod job_queue;
 pub mod printer;
 pub mod ws_client;
 
-use crate::config::Config;
 use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tokio::sync::Mutex as AsyncMutex;
 
 pub struct AppState {
-    pub ws_connected: Mutex<bool>,
-    pub ws_sender: AsyncMutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
+    pub agent_connections: AsyncMutex<std::collections::HashMap<String, AgentConnection>>,
     pub last_job_id: Mutex<Option<String>>,
     pub last_job_time: Mutex<Option<String>>,
     pub db_pool: AsyncMutex<Option<SqlitePool>>,
-    pub current_config: AsyncMutex<Option<Config>>,
-    pub ws_loop_started: Mutex<bool>,
+}
+
+pub struct AgentConnection {
+    pub connected: bool,
+    pub sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         AppState {
-            ws_connected: Mutex::new(false),
-            ws_sender: AsyncMutex::new(None),
+            agent_connections: AsyncMutex::new(std::collections::HashMap::new()),
             last_job_id: Mutex::new(None),
             last_job_time: Mutex::new(None),
             db_pool: AsyncMutex::new(None),
-            current_config: AsyncMutex::new(None),
-            ws_loop_started: Mutex::new(false),
         }
     }
 }
 
-pub async fn start_ws_loop(state: Arc<AppState>, cfg: &Config) {
-    {
-        let mut flag = state.ws_loop_started.lock().unwrap();
-        if *flag {
-            return;
-        }
-        *flag = true;
-    }
+pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
+    log::info!("start_ws_loop called with {} agents", cfg.agents.len());
 
     let pool_lock = state.db_pool.lock().await;
     let pool = match pool_lock.as_ref() {
@@ -54,18 +46,22 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &Config) {
     };
     drop(pool_lock);
 
-    let printer_target = printer::PrintTarget::from_config(cfg);
+    for agent in &cfg.agents {
+        log::info!("Starting WebSocket loop for agent: {} (zone: {})", agent.agent_id, agent.zone);
+        let printer_target = printer::PrintTarget::from_agent_config(agent);
 
-    tokio::spawn(ws_client::run_ws_loop(
-        Arc::clone(&state),
-        pool,
-        cfg.ws_url.clone(),
-        cfg.device_token.clone(),
-        cfg.agent_id.clone(),
-        cfg.zone.clone(),
-        cfg.branch_id.clone(),
-        printer_target,
-    ));
+        tokio::spawn(ws_client::run_ws_loop(
+            Arc::clone(&state),
+            pool.clone(),
+            agent.ws_url.clone(),
+            agent.device_token.clone(),
+            agent.agent_id.clone(),
+            agent.zone.clone(),
+            agent.branch_id.clone(),
+            agent.company_code.clone(),
+            printer_target,
+        ));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -132,11 +128,6 @@ async fn setup_app(app_handle: tauri::AppHandle, state: Arc<AppState>) {
 
     let cfg = config::load_config(&app_handle);
 
-    if let Some(ref c) = cfg {
-        let mut cfg_lock = state.current_config.lock().await;
-        *cfg_lock = Some(c.clone());
-    }
-
     let window = app_handle.get_webview_window("main").unwrap();
 
     if cfg.is_none() {
@@ -198,13 +189,13 @@ fn setup_tray(app_handle: &tauri::AppHandle) {
             "test_print" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let state = app.state::<Arc<AppState>>();
-                    let cfg_lock = state.current_config.lock().await;
-                    if let Some(cfg) = cfg_lock.as_ref() {
-                        let target = printer::PrintTarget::from_config(cfg);
-                        drop(cfg_lock);
-                        if let Err(e) = printer::test_print(&target) {
-                            log::error!("Tray test print failed: {}", e);
+                    let cfg = config::load_config(&app);
+                    if let Some(ref c) = cfg {
+                        if !c.agents.is_empty() {
+                            let target = printer::PrintTarget::from_agent_config(&c.agents[0]);
+                            if let Err(e) = printer::test_print(&target) {
+                                log::error!("Tray test print failed: {}", e);
+                            }
                         }
                     }
                 });

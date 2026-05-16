@@ -9,9 +9,10 @@ fn default_printer_type() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Config {
+pub struct AgentConfig {
     pub agent_id: String,
     pub company_id: String,
+    pub company_code: String,
     pub branch_id: String,
     pub zone: String,
     pub device_name: String,
@@ -27,21 +28,16 @@ pub struct Config {
     pub printer_network_port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Config {
+    pub agents: Vec<AgentConfig>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
-            agent_id: uuid::Uuid::new_v4().to_string(),
-            company_id: String::new(),
-            branch_id: String::new(),
-            zone: String::new(),
-            device_name: String::new(),
-            device_token: String::new(),
-            printer_port: String::new(),
-            paper_width: 80,
-            ws_url: "wss://your-saas.com/ws/agent".to_string(),
-            printer_type: "serial".to_string(),
-            printer_host: None,
-            printer_network_port: None,
+            agents: Vec::new(),
         }
     }
 }
@@ -81,4 +77,16 @@ pub fn delete_config(app_handle: &tauri::AppHandle) -> Result<(), String> {
         fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+pub fn add_agent(app_handle: &tauri::AppHandle, agent: AgentConfig) -> Result<(), String> {
+    let mut config = load_config(app_handle).unwrap_or_default();
+    config.agents.push(agent);
+    save_config(app_handle, &config)
+}
+
+pub fn remove_agent(app_handle: &tauri::AppHandle, agent_id: &str) -> Result<(), String> {
+    let mut config = load_config(app_handle).unwrap_or_default();
+    config.agents.retain(|a| a.agent_id != agent_id);
+    save_config(app_handle, &config)
 }

@@ -18,6 +18,7 @@ pub async fn run_ws_loop(
     agent_id: String,
     zone: String,
     branch_id: String,
+    company_id: String,
     printer_target: PrintTarget,
 ) {
     loop {
@@ -25,18 +26,23 @@ pub async fn run_ws_loop(
 
         match connect_async(&ws_url).await {
             Ok((ws_stream, _)) => {
-                log::info!("WebSocket connected.");
+                log::info!("WebSocket connected for agent {}", agent_id);
                 {
-                    let mut connected = state.ws_connected.lock().unwrap();
-                    *connected = true;
+                    let mut connections = state.agent_connections.lock().await;
+                    connections.entry(agent_id.clone()).or_insert_with(|| crate::AgentConnection {
+                        connected: true,
+                        sender: None,
+                    });
                 }
 
                 let (tx, rx): (UnboundedSender<String>, UnboundedReceiver<String>) =
                     mpsc::unbounded_channel();
 
                 {
-                    let mut sender = state.ws_sender.lock().await;
-                    *sender = Some(tx);
+                    let mut connections = state.agent_connections.lock().await;
+                    if let Some(conn) = connections.get_mut(&agent_id) {
+                        conn.sender = Some(tx.clone());
+                    }
                 }
 
                 let auth_msg = serde_json::json!({
@@ -45,6 +51,7 @@ pub async fn run_ws_loop(
                     "agentId": agent_id,
                     "zone": zone,
                     "branchId": branch_id,
+                    "companyCode": company_id,
                 })
                 .to_string();
 
@@ -52,7 +59,7 @@ pub async fn run_ws_loop(
 
                 if let Err(e) = write.send(Message::Text(auth_msg)).await {
                     log::error!("Failed to send auth message: {}", e);
-                    set_disconnected(&state).await;
+                    set_disconnected(&state, &agent_id).await;
                     sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -71,14 +78,14 @@ pub async fn run_ws_loop(
                             Some("auth_error") => {
                                 let msg = val.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
                                 log::error!("Server rejected auth: {}. Re-pairing required.", msg);
-                                set_disconnected(&state).await;
+                                set_disconnected(&state, &agent_id).await;
                                 // Back off for 60 s — bad token won't fix itself on retry
                                 sleep(Duration::from_secs(60)).await;
                                 continue;
                             }
                             _ => {
                                 log::warn!("Expected auth_ok, got: {}", text);
-                                set_disconnected(&state).await;
+                                set_disconnected(&state, &agent_id).await;
                                 sleep(Duration::from_secs(3)).await;
                                 continue;
                             }
@@ -86,19 +93,19 @@ pub async fn run_ws_loop(
                     }
                     Ok(Some(Err(e))) => {
                         log::warn!("Connection error during auth handshake: {}", e);
-                        set_disconnected(&state).await;
+                        set_disconnected(&state, &agent_id).await;
                         sleep(Duration::from_secs(3)).await;
                         continue;
                     }
                     Ok(None) | Err(_) => {
-                        log::warn!("Auth timeout — no auth_ok received within 5 s.");
-                        set_disconnected(&state).await;
+                        log::error!("Auth timeout or no auth_ok received");
+                        set_disconnected(&state, &agent_id).await;
                         sleep(Duration::from_secs(3)).await;
                         continue;
                     }
                     _ => {
                         log::warn!("Unexpected message during auth handshake.");
-                        set_disconnected(&state).await;
+                        set_disconnected(&state, &agent_id).await;
                         sleep(Duration::from_secs(3)).await;
                         continue;
                     }
@@ -135,12 +142,12 @@ pub async fn run_ws_loop(
                     log::warn!("WebSocket inbound error: {}", e);
                 }
 
-                set_disconnected(&state).await;
+                set_disconnected(&state, &agent_id).await;
                 log::info!("WebSocket disconnected. Reconnecting in 3s...");
             }
             Err(e) => {
                 log::warn!("WebSocket connection failed: {}. Retrying in 3s...", e);
-                set_disconnected(&state).await;
+                set_disconnected(&state, &agent_id).await;
             }
         }
 
@@ -171,7 +178,7 @@ where
                 handle_message(&text, pool, printer_target, agent_id, zone, Arc::clone(&state)).await;
             }
             Ok(Message::Ping(_)) => {
-                send_via_state(&state, r#"{"type":"pong"}"#.to_string()).await;
+                send_via_state(&state, &agent_id, r#"{"type":"pong"}"#.to_string()).await;
             }
             Ok(Message::Close(_)) => {
                 return Err("Server closed connection.".to_string());
@@ -232,7 +239,7 @@ async fn handle_message(
             }
         }
         Some("ping") => {
-            send_via_state(&state, r#"{"type":"pong"}"#.to_string()).await;
+            send_via_state(&state, &agent_id, r#"{"type":"pong"}"#.to_string()).await;
         }
         Some(t) => {
             log::debug!("Unhandled WS message type: {}", t);
@@ -243,18 +250,18 @@ async fn handle_message(
     }
 }
 
-async fn send_via_state(state: &Arc<AppState>, msg: String) {
-    let sender = state.ws_sender.lock().await;
-    if let Some(tx) = sender.as_ref() {
-        let _ = tx.send(msg);
+async fn send_via_state(state: &Arc<AppState>, agent_id: &str, msg: String) {
+    let connections = state.agent_connections.lock().await;
+    if let Some(conn) = connections.get(agent_id) {
+        if let Some(tx) = conn.sender.as_ref() {
+            let _ = tx.send(msg);
+        }
     }
 }
 
-async fn set_disconnected(state: &Arc<AppState>) {
-    {
-        let mut connected = state.ws_connected.lock().unwrap();
-        *connected = false;
+async fn set_disconnected(state: &Arc<AppState>, agent_id: &str) {
+    let mut connections = state.agent_connections.lock().await;
+    if let Some(conn) = connections.get_mut(agent_id) {
+        conn.connected = false;
     }
-    let mut sender = state.ws_sender.lock().await;
-    *sender = None;
 }

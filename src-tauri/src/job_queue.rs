@@ -119,3 +119,11 @@ pub async fn get_pending_count(pool: &SqlitePool) -> i64 {
         .map(|row| row.try_get::<i64, _>("cnt").unwrap_or(0))
         .unwrap_or(0)
 }
+
+pub async fn get_pending_count_for_agent(pool: &SqlitePool, agent_id: &str) -> Result<i64, sqlx::Error> {
+    sqlx::query("SELECT COUNT(*) as cnt FROM print_jobs WHERE status = 'pending' AND agent_id = ?")
+        .bind(agent_id)
+        .fetch_one(pool)
+        .await
+        .map(|row| row.try_get::<i64, _>("cnt").unwrap_or(0))
+}

@@ -42,9 +42,11 @@ pub async fn handle_print_job(
     })
     .to_string();
 
-    let sender = state.ws_sender.lock().await;
-    if let Some(tx) = sender.as_ref() {
-        let _ = tx.send(ack);
+    let connections = state.agent_connections.lock().await;
+    if let Some(conn) = connections.get(agent_id) {
+        if let Some(tx) = conn.sender.as_ref() {
+            let _ = tx.send(ack);
+        }
     }
 }
 

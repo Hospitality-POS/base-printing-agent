@@ -45,7 +45,9 @@ export default function SetupScreen({ onPaired }: Props) {
     setNetworkPrinters([]);
     setError(null);
     try {
+      console.log("Calling discover_network_printers...");
       const found = await invoke<string[]>("discover_network_printers");
+      console.log("Scan result:", found);
       setNetworkPrinters(found);
       if (found.length > 0 && !printerHost) {
         const first = found[0].split(" ")[0];
@@ -53,6 +55,7 @@ export default function SetupScreen({ onPaired }: Props) {
       }
       if (found.length === 0) setError("No printers found on port 9100. Enter the IP manually.");
     } catch (e) {
+      console.error("Network scan error:", e);
       setError("Network scan failed: " + String(e));
     } finally {
       setScanning(false);

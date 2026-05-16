@@ -14,14 +14,14 @@ pub enum PrintTarget {
 }
 
 impl PrintTarget {
-    pub fn from_config(config: &crate::config::Config) -> Self {
-        if config.printer_type == "network" {
+    pub fn from_agent_config(agent: &crate::config::AgentConfig) -> Self {
+        if agent.printer_type == "network" {
             PrintTarget::Network {
-                host: config.printer_host.clone().unwrap_or_default(),
-                port: config.printer_network_port.unwrap_or(9100),
+                host: agent.printer_host.clone().unwrap_or_default(),
+                port: agent.printer_network_port.unwrap_or(9100),
             }
         } else {
-            PrintTarget::Serial(config.printer_port.clone())
+            PrintTarget::Serial(agent.printer_port.clone())
         }
     }
 

@@ -18,7 +18,8 @@
         "height": 560,
         "resizable": false,
         "center": true,
-        "visible": false
+        "visible": false,
+        "devtools": true
       }
     ],
     "security": {

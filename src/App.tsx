@@ -3,9 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import SetupScreen from "./screens/SetupScreen";
 import StatusScreen from "./screens/StatusScreen";
 
-interface Config {
+interface AgentConfig {
   agentId: string;
   companyId: string;
+  companyCode: string;
   branchId: string;
   zone: string;
   deviceName: string;
@@ -13,6 +14,13 @@ interface Config {
   printerPort: string;
   paperWidth: number;
   wsUrl: string;
+  printerType: string;
+  printerHost?: string;
+  printerNetworkPort?: number;
+}
+
+interface Config {
+  agents: AgentConfig[];
 }
 
 export default function App() {
@@ -20,7 +28,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    invoke<Config | null>("get_config")
+    invoke<Config>("get_config")
       .then((cfg) => {
         setConfig(cfg);
       })
@@ -41,9 +49,9 @@ export default function App() {
     );
   }
 
-  if (!config) {
-    return <SetupScreen onPaired={() => invoke<Config | null>("get_config").then(setConfig)} />;
+  if (!config || config.agents.length === 0) {
+    return <SetupScreen onPaired={() => invoke<Config>("get_config").then(setConfig)} />;
   }
 
-  return <StatusScreen onUnpair={() => setConfig(null)} />;
+  return <StatusScreen config={config} onConfigChange={() => invoke<Config>("get_config").then(setConfig)} onShowSetup={() => setConfig(null)} />;
 }
