@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAgentStatus } from "../hooks/useAgentStatus";
 
 interface Props {
-  config: { agents: Array<{ agentId: string; zone: string; deviceName: string; branchId: string }> };
+  config: { agents: Array<{ agentId: string; zone: string; deviceName: string; branchId: string; printerType: string; printerHost?: string }> };
   onConfigChange: () => void;
   onShowSetup: () => void;
 }
@@ -127,6 +127,16 @@ export default function StatusScreen({ config, onConfigChange, onShowSetup }: Pr
                         <p className="text-gray-500 text-xs mb-1">Zone</p>
                         <p className="text-white text-sm">{agent.zone}</p>
                       </div>
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <p className="text-gray-500 text-xs mb-1">Printer Type</p>
+                        <p className="text-white text-sm capitalize">{agent.printerType}</p>
+                      </div>
+                      {agent.printerType === "network" && agent.printerHost && (
+                        <div className="bg-gray-800/50 rounded-lg p-3">
+                          <p className="text-gray-500 text-xs mb-1">Printer IP</p>
+                          <p className="text-white text-sm">{agent.printerHost}</p>
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center justify-between">
                       <button

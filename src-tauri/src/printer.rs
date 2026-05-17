@@ -126,33 +126,22 @@ fn write_bytes(target: &PrintTarget, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn write_to_serial(port_name: &str, bytes: &[u8]) -> Result<(), String> {
-    if port_name.starts_with("/dev/usb/") || port_name.starts_with("/dev/lp") {
-        use std::fs::OpenOptions;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(port_name)
-            .map_err(|e| format!("Failed to open device {}: {}", port_name, e))?;
-        file.write_all(bytes)
-            .map_err(|e| format!("Failed to write to device: {}", e))?;
-    } else {
-        let mut port = open_serial_port(port_name)?;
-        port.write_all(bytes)
-            .map_err(|e| format!("Failed to write to port: {}", e))?;
-    }
+    let mut port = open_serial_port(port_name)?;
+    port.write_all(bytes)
+        .map_err(|e| format!("Failed to write to serial port: {}", e))?;
     Ok(())
 }
 
 fn write_to_network(host: &str, port: u16, bytes: &[u8]) -> Result<(), String> {
     use std::net::TcpStream;
+    use std::io::Write;
+    
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect(&addr)
-        .map_err(|e| format!("Cannot connect to printer at {} → {}", addr, e))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok();
-    stream
-        .write_all(bytes)
-        .map_err(|e| format!("Failed to write to network printer {}: {}", addr, e))?;
+        .map_err(|e| format!("Failed to connect to network printer: {}", e))?;
+    
+    stream.write_all(bytes)
+        .map_err(|e| format!("Failed to write to network printer: {}", e))?;
     Ok(())
 }
 

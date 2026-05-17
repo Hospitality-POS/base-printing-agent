@@ -7,9 +7,17 @@ interface Props {
 
 type PrinterType = "serial" | "network";
 
+interface Shop {
+  _id: string;
+  name: string;
+  shop_code?: string;
+}
+
 export default function SetupScreen({ onPaired }: Props) {
   const [companyCode, setCompanyCode] = useState("");
   const [branchId, setBranchId] = useState("");
+  const [shops, setShops] = useState<Shop[]>([]);
+  const [shopsLoading, setShopsLoading] = useState(false);
   const [zone, setZone] = useState("");
   const [deviceName, setDeviceName] = useState("");
   const [printerType, setPrinterType] = useState<PrinterType>("serial");
@@ -40,6 +48,33 @@ export default function SetupScreen({ onPaired }: Props) {
     }
   };
 
+  const fetchShops = async (code: string) => {
+    if (!code.trim()) {
+      setShops([]);
+      setBranchId("");
+      return;
+    }
+    setShopsLoading(true);
+    setError(null);
+    try {
+      const shopsJson = await invoke<string>("fetch_shops", { companyCode: code.trim() });
+      const shopsData = JSON.parse(shopsJson) as Shop[];
+      setShops(shopsData);
+      if (shopsData.length > 0) {
+        setBranchId(shopsData[0]._id);
+      } else {
+        setBranchId("");
+        setError("No shops found for this company code");
+      }
+    } catch (e) {
+      setShops([]);
+      setBranchId("");
+      setError(e instanceof Error ? e.message : "Failed to fetch shops");
+    } finally {
+      setShopsLoading(false);
+    }
+  };
+
   const scanNetworkPrinters = async () => {
     setScanning(true);
     setNetworkPrinters([]);
@@ -65,6 +100,14 @@ export default function SetupScreen({ onPaired }: Props) {
   useEffect(() => {
     loadPorts();
   }, []);
+
+  // Fetch shops when company code changes (debounced)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchShops(companyCode);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [companyCode]);
 
   const printerReady = printerType === "network"
     ? printerHost.trim().length > 0
@@ -153,14 +196,33 @@ export default function SetupScreen({ onPaired }: Props) {
             />
           </Field>
 
-          <Field label="Branch ID" required>
-            <input
-              type="text"
-              value={branchId}
-              onChange={(e) => setBranchId(e.target.value)}
-              placeholder="e.g. branch-nairobi-001"
-              className="input-field"
-            />
+          <Field label="Branch" required>
+            {shopsLoading ? (
+              <div className="input-field flex items-center justify-center text-gray-500 text-sm">
+                <div className="w-4 h-4 border border-gray-500 border-t-transparent rounded-full animate-spin mr-2" />
+                Loading shops...
+              </div>
+            ) : shops.length > 0 ? (
+              <select
+                value={branchId}
+                onChange={(e) => setBranchId(e.target.value)}
+                className="input-field"
+              >
+                {shops.map((shop) => (
+                  <option key={shop._id} value={shop._id}>
+                    {shop.name} {shop.shop_code ? `(${shop.shop_code})` : ""}
+                  </option>
+                ))}
+              </select>
+            ) : companyCode.trim() ? (
+              <div className="input-field text-gray-500 text-sm">
+                No shops found for this company code
+              </div>
+            ) : (
+              <div className="input-field text-gray-600 text-sm">
+                Enter company code above to load shops
+              </div>
+            )}
           </Field>
 
           <div className="grid grid-cols-2 gap-3">
