@@ -112,7 +112,8 @@ jobs:
 
   build-macos-intel:
     needs: create-release
-    runs-on: macos-13
+    runs-on: macos-latest
+    if: false
     steps:
       - uses: actions/checkout@v4
 
@@ -143,7 +144,7 @@ jobs:
 
   # ── Step 3: publish the draft once all builds are attached ─────────────────
   publish-release:
-    needs: [create-release, build-windows, build-macos-arm, build-macos-intel]
+    needs: [create-release, build-windows, build-macos-arm]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release
