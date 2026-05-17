@@ -1,4 +1,4 @@
-use crate::job_queue::PrintJob;
+use crate::commands::PrintJob;
 use serialport::SerialPort;
 use std::io::Write;
 use std::time::Duration;
@@ -18,7 +18,7 @@ impl PrintTarget {
         if agent.printer_type == "network" {
             PrintTarget::Network {
                 host: agent.printer_host.clone().unwrap_or_default(),
-                port: agent.printer_network_port.unwrap_or(9100),
+                port: agent.printer_network_port.unwrap_or(9100) as u16,
             }
         } else {
             PrintTarget::Serial(agent.printer_port.clone())
@@ -173,7 +173,13 @@ pub fn format_receipt(job: &PrintJob) -> Vec<u8> {
                 bytes.push(LF);
             }
             "divider" => {
-                add_divider(&mut bytes);
+                let divider_text = if line.text.is_empty() {
+                    "-".repeat(42)
+                } else {
+                    line.text.clone()
+                };
+                add_text(&mut bytes, &divider_text);
+                bytes.push(LF);
             }
             "total" => {
                 add_divider(&mut bytes);

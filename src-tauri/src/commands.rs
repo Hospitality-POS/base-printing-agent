@@ -1,10 +1,35 @@
 use crate::config::{self, Config};
-use crate::job_queue;
 use crate::printer;
-use crate::{start_ws_loop, AppState};
+use crate::AppState;
+use crate::start_ws_loop;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintJobLine {
+    #[serde(rename = "type")]
+    pub line_type: String,
+    pub text: String,
+    pub qty: Option<u32>,
+    pub price: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintJob {
+    #[serde(rename = "_id")]
+    pub id: Option<String>,
+    pub job_id: String,
+    pub branch_id: String,
+    pub destination_zone: String,
+    pub content_type: String,
+    pub lines: Vec<PrintJobLine>,
+    pub cut_paper: bool,
+    pub priority: String,
+    pub created_at: String,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,13 +52,46 @@ struct PairResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ServerAgent {
+    #[serde(rename = "_id", default)]
+    pub _id: Option<String>,
+    #[serde(rename = "agent_id")]
     pub agent_id: String,
+    #[serde(rename = "company_code")]
+    pub company_code: String,
+    #[serde(rename = "company_id")]
+    pub company_id: String,
+    #[serde(rename = "shop_id")]
     pub shop_id: String,
+    #[serde(rename = "zone")]
     pub zone: String,
+    #[serde(rename = "device_name")]
     pub device_name: String,
+    #[serde(rename = "is_active")]
     pub is_active: bool,
+    #[serde(rename = "last_seen", default)]
+    pub last_seen: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: Option<String>,
+    #[serde(rename = "printer_port", default)]
+    pub printer_port: Option<String>,
+    #[serde(rename = "printer_type", default)]
+    pub printer_type: Option<String>,
+    #[serde(rename = "printer_host", default)]
+    pub printer_host: Option<String>,
+    #[serde(rename = "printer_network_port", default)]
+    pub printer_network_port: Option<i64>,
+    #[serde(rename = "__v", default)]
+    pub __v: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectedAgentsResponse {
+    agents: Vec<ServerAgent>,
+    count: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +125,7 @@ pub async fn fetch_shops(company_code: String) -> Result<String, String> {
 
     let client = reqwest::Client::new();
 
-    let url = format!("{}/shops", api_base);
+    let url = format!("{}/api/shops", api_base);
 
     let resp = client
         .get(&url)
@@ -132,6 +190,364 @@ pub async fn list_agents(
 }
 
 #[tauri::command]
+pub async fn fetch_connected_agents(
+    company_code: String,
+    shop_id: String,
+) -> Result<String, String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+
+    let client = reqwest::Client::new();
+
+    let url = format!("{}/api/agents/connected?shop_id={}", api_base, shop_id);
+
+    let resp = client
+        .get(&url)
+        .header("companycode", &company_code)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Fetch connected agents request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Fetch connected agents failed ({}): {}", status, text));
+    }
+
+    let body_text = resp.text().await.map_err(|e| format!("Failed to read response body: {}", e))?;
+    eprintln!("Connected agents response body: {}", body_text);
+
+    let connected_resp: ConnectedAgentsResponse = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse connected agents response: {} | Body was: {}", e, body_text))?;
+
+    serde_json::to_string(&connected_resp)
+        .map_err(|e| format!("Failed to serialize connected agents: {}", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentDetailsResponse {
+    agent_id: String,
+    device_token: String,
+    ws_url: String,
+    company_id: String,
+}
+
+#[tauri::command]
+pub async fn auto_add_connected_agent(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    agent_id: String,
+    company_code: String,
+    company_id: String,
+    shop_id: String,
+    zone: String,
+    device_name: String,
+) -> Result<(), String> {
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+
+    // Check if agent already exists in local config and update it if it does
+    let agent_exists = cfg.agents.iter().any(|a| a.agent_id == agent_id);
+    if agent_exists {
+        // Update existing agent with shop_id and zone if they're missing
+        for agent in &mut cfg.agents {
+            if agent.agent_id == agent_id {
+                let needs_update = agent.branch_id.is_empty() || (agent.zone.is_empty() && !zone.is_empty());
+
+                if agent.branch_id.is_empty() {
+                    agent.branch_id = shop_id.clone();
+                }
+                if agent.zone.is_empty() && !zone.is_empty() {
+                    agent.zone = zone.clone();
+                }
+                log::info!("Updated existing agent: {} with branch_id: {}, zone: {}", device_name, shop_id, zone);
+
+                // Sync to API if fields were updated
+                if needs_update {
+                    sync_agent_to_api(&app_handle, agent, &company_code).await?;
+                }
+            }
+        }
+        config::save_config(&app_handle, &cfg)?;
+        return Ok(());
+    }
+
+    // Fetch agent details from API to get printer configuration
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/agents/{}", api_base, agent_id);
+
+    let resp = client
+        .get(&url)
+        .header("companycode", &company_code)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await;
+
+    let (printer_port, printer_type, printer_host, printer_network_port): (String, String, Option<String>, Option<i64>) = match resp {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<ServerAgent>().await {
+                Ok(agent_details) => (
+                    agent_details.printer_port.unwrap_or_default(),
+                    agent_details.printer_type.unwrap_or_else(|| "serial".to_string()),
+                    agent_details.printer_host,
+                    agent_details.printer_network_port,
+                ),
+                Err(_) => (
+                    String::new(),
+                    "serial".to_string(),
+                    None,
+                    None,
+                ),
+            }
+        }
+        _ => (
+            String::new(),
+            "serial".to_string(),
+            None,
+            None,
+        ),
+    };
+
+    let new_agent = config::AgentConfig {
+        agent_id: agent_id.clone(),
+        company_code: company_code.clone(),
+        company_id: company_id.clone(),
+        branch_id: shop_id.clone(),
+        zone: zone.clone(),
+        device_name: device_name.clone(),
+        device_token: String::new(),
+        printer_port,
+        paper_width: 80,
+        ws_url: String::new(),
+        printer_type,
+        printer_host,
+        printer_network_port,
+    };
+
+    config::add_agent(&app_handle, new_agent.clone())?;
+    log::info!("Auto-added connected agent: {} ({}) with branch_id: {}", device_name, agent_id, shop_id);
+
+    // Don't start WebSocket loop here - agent doesn't have credentials yet
+    Ok(())
+}
+
+async fn sync_agent_to_api(
+    app_handle: &tauri::AppHandle,
+    agent: &config::AgentConfig,
+    company_code: &str,
+) -> Result<(), String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+
+    let client = reqwest::Client::new();
+
+    let url = format!("{}/api/agents/{}/update", api_base, agent.agent_id);
+
+    let mut payload = serde_json::json!({
+        "branch_id": agent.branch_id,
+        "zone": agent.zone,
+        "printer_type": agent.printer_type,
+        "printer_port": agent.printer_port,
+    });
+
+    if let Some(ref host) = agent.printer_host {
+        payload["printer_host"] = serde_json::Value::String(host.clone());
+    }
+    if let Some(port) = agent.printer_network_port {
+        payload["printer_network_port"] = serde_json::Value::Number(port.into());
+    }
+
+    let resp = client
+        .put(&url)
+        .header("companycode", company_code)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Sync agent to API request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Sync agent to API failed ({}): {}", status, text));
+    }
+
+    log::info!("Synced agent {} to API with printer configuration", agent.agent_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connect_to_existing_agent(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    company_code: String,
+    agent_id: String,
+    printer_port: String,
+    printer_type: String,
+    printer_host: Option<String>,
+    printer_network_port: Option<i64>,
+) -> Result<(), String> {
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+
+    let new_agent = config::AgentConfig {
+        agent_id: agent_id.clone(),
+        company_code: company_code.clone(),
+        company_id: String::new(), // Will be fetched from API
+        branch_id: String::new(),
+        zone: String::new(), // Will be fetched from API
+        device_name: String::new(), // Will be fetched from API
+        device_token: String::new(),
+        printer_port: printer_port.clone(),
+        paper_width: 80,
+        ws_url: String::new(),
+        printer_type: printer_type.clone(),
+        printer_host: printer_host.clone(),
+        printer_network_port,
+    };
+
+    config::add_agent(&app_handle, new_agent.clone())?;
+
+    // Sync printer configuration to API
+    sync_agent_to_api(&app_handle, &new_agent, &company_code).await?;
+
+    start_ws_loop(state.inner().clone(), &cfg).await;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PendingJob {
+    #[serde(rename = "_id")]
+    pub _id: String,
+    #[serde(rename = "job_id")]
+    pub job_id: String,
+    #[serde(rename = "shop_id")]
+    pub shop_id: String,
+    #[serde(rename = "zone")]
+    pub zone: String,
+    #[serde(rename = "main_category_id")]
+    pub main_category_id: String,
+    #[serde(rename = "order_no")]
+    pub order_no: String,
+    #[serde(rename = "content_type")]
+    pub content_type: String,
+    #[serde(rename = "cut_paper")]
+    pub cut_paper: bool,
+    #[serde(rename = "priority")]
+    pub priority: String,
+    #[serde(rename = "status")]
+    pub status: String,
+    pub lines: Vec<PrintJobLine>,
+    #[serde(rename = "retry_count")]
+    pub retry_count: i32,
+    #[serde(rename = "created_at", default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingJobsResponse {
+    jobs: Vec<PendingJob>,
+    total: i32,
+}
+
+#[tauri::command]
+pub async fn fetch_pending_jobs(
+    shop_id: String,
+    zone: String,
+    status: Option<String>,
+) -> Result<String, String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+
+    let client = reqwest::Client::new();
+
+    let mut url = format!("{}/api/agents/pending-jobs?shop_id={}", api_base, shop_id);
+    if !zone.is_empty() {
+        url.push_str(&format!("&zone={}", urlencoding::encode(&zone)));
+    }
+    if let Some(s) = status {
+        url.push_str(&format!("&status={}", s));
+    }
+
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Fetch pending jobs request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Fetch pending jobs failed ({}): {}", status, text));
+    }
+
+    let body = resp.text().await.map_err(|e| format!("Failed to read response body: {}", e))?;
+    Ok(body)
+}
+
+#[tauri::command]
+pub async fn update_agent_printer_port(
+    app_handle: tauri::AppHandle,
+    agent_id: String,
+    printer_port: String,
+    printer_type: String,
+    printer_host: Option<String>,
+    printer_network_port: Option<i64>,
+    company_code: String,
+) -> Result<(), String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+
+    let client = reqwest::Client::new();
+
+    let url = format!("{}/api/agents/{}/update", api_base, agent_id);
+
+    let mut payload = serde_json::json!({
+        "printer_port": printer_port,
+        "printer_type": printer_type,
+    });
+
+    if let Some(ref host) = printer_host {
+        payload["printer_host"] = serde_json::Value::String(host.clone());
+    }
+    if let Some(port) = printer_network_port {
+        payload["printer_network_port"] = serde_json::Value::Number(port.into());
+    }
+
+    let resp = client
+        .put(&url)
+        .header("companycode", &company_code)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Update agent request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Update agent failed ({}): {}", status, text));
+    }
+
+    // Update local config
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    if let Some(agent) = cfg.agents.iter_mut().find(|a| a.agent_id == agent_id) {
+        agent.printer_port = printer_port.clone();
+        agent.printer_type = printer_type.clone();
+        agent.printer_host = printer_host.clone();
+        agent.printer_network_port = printer_network_port;
+        config::save_config(&app_handle, &cfg)?;
+        log::info!("Updated local config for agent: {} - printer_type: {}, printer_port: {}, printer_host: {:?}, printer_network_port: {:?}",
+            agent_id, printer_type, printer_port, printer_host, printer_network_port);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_config(app_handle: tauri::AppHandle) -> Config {
     config::load_config(&app_handle).unwrap_or_default()
 }
@@ -143,8 +559,6 @@ pub async fn get_agent_status(
 ) -> Result<Vec<AgentStatus>, String> {
     let cfg = config::load_config(&app_handle).unwrap_or_default();
     let connections = state.agent_connections.lock().await;
-    let pool_lock = state.db_pool.lock().await;
-    let pool = pool_lock.as_ref().ok_or("DB pool not initialized")?;
 
     let mut statuses = Vec::new();
     for agent in &cfg.agents {
@@ -153,7 +567,8 @@ pub async fn get_agent_status(
             .map(|c| c.connected)
             .unwrap_or(false);
 
-        let queue_count = job_queue::get_pending_count_for_agent(pool, &agent.agent_id).await.unwrap_or(0);
+        // Queue count is now tracked by the API, local tracking removed
+        let queue_count = 0;
 
         statuses.push(AgentStatus {
             agent_id: agent.agent_id.clone(),
@@ -179,7 +594,7 @@ pub async fn pair_device(
     printer_port: String,
     printer_type: String,
     printer_host: Option<String>,
-    printer_network_port: Option<u16>,
+    printer_network_port: Option<i64>,
 ) -> Result<(), String> {
     let api_base = std::env::var("PRINT_AGENT_API_URL")
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
@@ -371,12 +786,11 @@ pub async fn pair_device(
 #[tauri::command]
 pub async fn test_print(
     app_handle: tauri::AppHandle,
-    _state: State<'_, Arc<AppState>>,
     agent_id: Option<String>,
     printer_type: Option<String>,
     printer_port: Option<String>,
     printer_host: Option<String>,
-    printer_network_port: Option<u16>,
+    printer_network_port: Option<i64>,
 ) -> Result<(), String> {
     let cfg = config::load_config(&app_handle).unwrap_or_default();
 
@@ -395,7 +809,7 @@ pub async fn test_print(
         if printer_type == "network" {
             printer::PrintTarget::Network {
                 host: printer_host,
-                port: printer_network_port,
+                port: printer_network_port as u16,
             }
         } else {
             printer::PrintTarget::Serial(printer_port)
@@ -430,4 +844,130 @@ pub async fn unpair_device(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn test_printer_connection(
+    printer_host: String,
+    printer_network_port: u16,
+) -> Result<String, String> {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let address_str = format!("{}:{}", printer_host, printer_network_port);
+    log::info!("Testing printer connection to {}", address_str);
+
+    // Parse the address string to SocketAddr
+    let socket_addr: SocketAddr = match address_str.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            // Try to resolve as hostname
+            match (printer_host.as_str(), printer_network_port).to_socket_addrs() {
+                Ok(mut addrs) => {
+                    match addrs.next() {
+                        Some(addr) => addr,
+                        None => return Err(format!("No addresses found for {}", printer_host)),
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Failed to resolve address: {}", e));
+                }
+            }
+        }
+    };
+
+    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5)) {
+        Ok(_) => {
+            log::info!("Successfully connected to printer at {}", socket_addr);
+            Ok(format!("Successfully connected to printer at {}", socket_addr))
+        }
+        Err(e) => {
+            log::error!("Failed to connect to printer at {}: {}", socket_addr, e);
+            Err(format!("Failed to connect to printer at {}: {}", socket_addr, e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_agents_from_api(shop_id: String) -> Result<Vec<ServerAgent>, String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/agents/list?shop_id={}", api_base, shop_id);
+
+    log::info!("Fetching agents from API: {}", url);
+
+    let response = client
+        .get(&url)
+        .header("companycode", "RPOS-000002")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            log::info!("API response status: {}", resp.status());
+            let body = resp.text().await;
+            match &body {
+                Ok(text) => log::info!("API response body: {}", text),
+                Err(e) => log::error!("Failed to read response body: {}", e),
+            }
+
+            #[derive(serde::Deserialize)]
+            struct AgentsResponse {
+                agents: Vec<ServerAgent>,
+            }
+
+            let body_str = body.map_err(|e| format!("Failed to read response: {}", e))?;
+            let agents_response: AgentsResponse = serde_json::from_str(&body_str)
+                .map_err(|e| format!("Failed to parse agents response: {} (body: {})", e, body_str))?;
+
+            log::info!("Fetched {} agents from API", agents_response.agents.len());
+            Ok(agents_response.agents)
+        }
+        Err(e) => {
+            log::error!("Failed to fetch agents from API: {}", e);
+            Err(format!("Failed to fetch agents from API: {}", e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn remove_duplicate_agents(app_handle: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+
+    log::info!("Current agent count: {}", cfg.agents.len());
+    for (i, agent) in cfg.agents.iter().enumerate() {
+        log::info!("Agent {}: {} (zone: {})", i, agent.agent_id, agent.zone);
+    }
+
+    // Track seen agent IDs to identify duplicates
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut duplicates_to_remove = Vec::new();
+
+    for (index, agent) in cfg.agents.iter().enumerate() {
+        if seen_ids.contains(&agent.agent_id) {
+            log::info!("Found duplicate at index {}: {}", index, agent.agent_id);
+            duplicates_to_remove.push(index);
+        } else {
+            seen_ids.insert(agent.agent_id.clone());
+        }
+    }
+
+    let count = duplicates_to_remove.len();
+    log::info!("Found {} duplicates to remove", count);
+
+    // Remove duplicates in reverse order to maintain indices
+    for index in duplicates_to_remove.into_iter().rev() {
+        let removed_agent = cfg.agents.remove(index);
+        log::info!("Removed duplicate agent at index {}: {:?}", index, removed_agent.device_name);
+    }
+
+    config::save_config(&app_handle, &cfg)?;
+    log::info!("Saved config with {} agents", cfg.agents.len());
+
+    // Restart WebSocket loop with cleaned config
+    start_ws_loop(state.inner().clone(), &cfg).await;
+
+    Ok(count)
 }

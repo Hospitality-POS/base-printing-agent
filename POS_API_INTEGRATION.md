@@ -440,3 +440,143 @@ yarn add ws
 ```
 
 No other new runtime dependencies are required.
+
+---
+
+## 10. PrintAgent — Authentication & Environment Guide
+
+> **Audience:** developer building or configuring the PrintAgent desktop application (Windows / macOS).
+
+### 10.1 Environment — Local vs Production
+
+Place a `.env` file next to the agent executable **or** set a system environment variable.
+
+| Environment | `PRINT_AGENT_API_URL` |
+|-------------|----------------------|
+| **Production** | `https://api.hospitality.reliatech.co.ke` |
+| **Local dev** | `http://localhost:3002` |
+
+The `wsUrl` is returned by the server in the pairing response and stored in local config — the agent uses it as-is. The API URL is only needed for the initial pairing call.
+
+### 10.2 First-Time Setup — Pairing Flow
+
+```
+Agent setup screen
+        │
+        │  User enters: Company Code, Branch ID, Zone, Device Name
+        ▼
+POST {PRINT_AGENT_API_URL}/api/agents/pair
+
+Request body:
+{
+  "companyCode": "<entered by user>",
+  "branchId":    "<entered by user>",   ← stored as shop_id on the server
+  "zone":        "kitchen",
+  "deviceName":  "Kitchen Printer 1"
+}
+        │
+        │  200 OK
+        ▼
+Saved to local config.json:
+{
+  "agentId":     "agt_xxxx",
+  "deviceToken": "tok_xxxx",   ← treat like a password — never log it
+  "wsUrl":       "wss://…/ws/agent",
+  "companyId":   "…",
+  "zone":        "kitchen",
+  "branchId":    "<entered by user>"
+}
+```
+
+#### Pairing error handling
+
+| HTTP status | Displayed to user |
+|-------------|------------------|
+| `400` | "Missing required fields — check all inputs" |
+| `404` | "Company code not found — check the code and try again" |
+| `403` | "Branch not authorised — contact your administrator" |
+| `409` | "A printer agent is already registered for this zone — unpair it first" |
+| `5xx` | "Server unreachable — check your internet connection" |
+
+### 10.3 Credential Storage
+
+| OS | Path |
+|----|------|
+| Windows | `%APPDATA%\PrintAgent\config.json` |
+| macOS | `~/Library/Application Support/PrintAgent/config.json` |
+
+Never store `deviceToken` in plain environment variables or the registry.
+
+### 10.4 WebSocket Authentication Sequence
+
+Every time the agent (re-)connects:
+
+```
+Agent                                    Server
+  │── TCP/TLS handshake ────────────────▶│
+  │◀─ 101 Switching Protocols ───────────│
+  │                                       │
+  │── { type: "auth",          ──────────▶│  sent immediately after handshake
+  │     deviceToken: "tok_…",             │
+  │     agentId:     "agt_…",             │
+  │     zone:        "kitchen",           │
+  │     branchId:    "nairobi-001" }      │
+  │                                       │
+  │◀─ { type: "auth_ok" } ───────────────│  agent is now active
+       OR
+  │◀─ { type: "auth_error",              │  token invalid / agent unpaired
+  │     message: "…" }                   │
+```
+
+**On `auth_error`:** do not retry with the same credentials. Show notification: *"Printer agent authentication failed — please re-pair the device."*
+
+**On timeout (no `auth_ok` within 5 s):** treat as network error, retry after 3 s.
+
+### 10.5 Reconnect Loop
+
+```
+on_disconnect():
+    wait 3 seconds
+    open new WebSocket to wsUrl
+    send auth message immediately
+    if auth_ok  → resume normal operation
+    if auth_error → stop reconnecting, alert user
+    if timeout  → repeat loop
+```
+
+The agent **must** re-send the full `auth` message on every new connection.
+
+### 10.6 Handling Print Jobs
+
+After `auth_ok`, the server pushes `print_job` messages at any time.
+
+**Zone filtering (agent-side):**
+```
+if job.destinationZone != agent.zone → silently ignore, do not ACK
+```
+
+**Deduplication:**
+```
+if jobId already in local SQLite → silently ignore
+else → print → record jobId → send print_ack
+```
+
+### 10.7 Keepalive
+
+- Server sends `{ "type": "ping" }` every **30 s** — agent replies with `{ "type": "pong" }`
+- WebSocket-level `PING` frames are handled automatically by `tokio-tungstenite`
+- If no message of any kind is received for **90 s** → assume dead connection → reconnect
+
+### 10.8 Quick-Reference: What to Store
+
+| Data | Store locally | Notes |
+|------|--------------|-------|
+| `agentId` | ✅ permanent | Used in every `auth` and `print_ack` |
+| `deviceToken` | ✅ permanent | Used in every `auth` — treat like a password |
+| `wsUrl` | ✅ permanent | Use as-is from pairing response |
+| `zone` | ✅ permanent | Used for self-filtering jobs |
+| `branchId` | ✅ permanent | Used in every `auth` |
+| `companyId` | ✅ optional | Informational only |
+| `jobId` (printed) | ✅ SQLite | Deduplication — keep indefinitely |
+| `jobId` (failed) | ✅ SQLite queue | Retry on next reconnect |
+| Print job `lines` | ❌ discard | No need to persist after printing |

@@ -25,7 +25,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub printer_host: Option<String>,
     #[serde(default)]
-    pub printer_network_port: Option<u16>,
+    pub printer_network_port: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

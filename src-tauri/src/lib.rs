@@ -1,11 +1,9 @@
 pub mod commands;
 pub mod config;
 pub mod job_handler;
-pub mod job_queue;
 pub mod printer;
 pub mod ws_client;
 
-use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tokio::sync::Mutex as AsyncMutex;
@@ -14,7 +12,7 @@ pub struct AppState {
     pub agent_connections: AsyncMutex<std::collections::HashMap<String, AgentConnection>>,
     pub last_job_id: Mutex<Option<String>>,
     pub last_job_time: Mutex<Option<String>>,
-    pub db_pool: AsyncMutex<Option<SqlitePool>>,
+    pub app_handle: tauri::AppHandle,
 }
 
 pub struct AgentConnection {
@@ -23,12 +21,12 @@ pub struct AgentConnection {
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(app_handle: tauri::AppHandle) -> Self {
         AppState {
             agent_connections: AsyncMutex::new(std::collections::HashMap::new()),
             last_job_id: Mutex::new(None),
             last_job_time: Mutex::new(None),
-            db_pool: AsyncMutex::new(None),
+            app_handle,
         }
     }
 }
@@ -36,50 +34,91 @@ impl AppState {
 pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
     log::info!("start_ws_loop called with {} agents", cfg.agents.len());
 
-    let pool_lock = state.db_pool.lock().await;
-    let pool = match pool_lock.as_ref() {
-        Some(p) => p.clone(),
-        None => {
-            log::error!("DB pool not ready, cannot start WS loop.");
-            return;
-        }
-    };
-    drop(pool_lock);
-
+    // Deduplicate agents by agent_id to avoid duplicate polling loops
+    let mut seen_agents = std::collections::HashSet::new();
+    let mut unique_agents = Vec::new();
     for agent in &cfg.agents {
-        log::info!("Starting WebSocket loop for agent: {} (zone: {})", agent.agent_id, agent.zone);
-        let printer_target = printer::PrintTarget::from_agent_config(agent);
+        if seen_agents.insert(&agent.agent_id) {
+            unique_agents.push(agent);
+        } else {
+            log::warn!("Skipping duplicate agent: {}", agent.agent_id);
+        }
+    }
+    log::info!("After deduplication: {} unique agents", unique_agents.len());
 
-        tokio::spawn(ws_client::run_ws_loop(
-            Arc::clone(&state),
-            pool.clone(),
-            agent.ws_url.clone(),
-            agent.device_token.clone(),
-            agent.agent_id.clone(),
-            agent.zone.clone(),
-            agent.branch_id.clone(),
-            agent.company_code.clone(),
-            printer_target,
-        ));
+    for agent in unique_agents {
+        let printer_target = match agent.printer_type.as_str() {
+            "network" => {
+                if let (Some(host), Some(port)) = (&agent.printer_host, agent.printer_network_port) {
+                    printer::PrintTarget::Network {
+                        host: host.clone(),
+                        port: port as u16,
+                    }
+                } else {
+                    log::warn!("Network printer for {} missing host or port, skipping", agent.agent_id);
+                    continue;
+                }
+            }
+            _ => printer::PrintTarget::Serial(agent.printer_port.clone()),
+        };
+
+        // Only start WebSocket loop if agent has valid credentials
+        if !agent.ws_url.is_empty() && !agent.device_token.is_empty() {
+            log::info!("Starting WebSocket loop for agent: {}", agent.agent_id);
+            tokio::spawn(ws_client::run_ws_loop(
+                Arc::clone(&state),
+                agent.ws_url.clone(),
+                agent.device_token.clone(),
+                agent.agent_id.clone(),
+                agent.zone.clone(),
+                agent.branch_id.clone(),
+                agent.company_code.clone(),
+                printer_target.clone(),
+            ));
+        } else {
+            log::info!("Agent {} missing WebSocket credentials, skipping WebSocket connection", agent.agent_id);
+        }
+
+        // Start polling loop for pull-based job fetching
+        if !agent.branch_id.is_empty() && !agent.zone.is_empty() {
+            // Check if printer configuration is valid
+            let has_valid_printer = match agent.printer_type.as_str() {
+                "network" => {
+                    agent.printer_host.as_ref().map_or(false, |h| !h.is_empty())
+                        && agent.printer_network_port.is_some()
+                }
+                _ => !agent.printer_port.is_empty(),
+            };
+
+            if has_valid_printer {
+                log::info!("Starting polling loop for agent: {} (zone: {})", agent.agent_id, agent.zone);
+                tokio::spawn(ws_client::start_polling_loop(
+                    Arc::clone(&state),
+                    agent.branch_id.clone(),
+                    agent.zone.clone(),
+                    agent.company_code.clone(),
+                    agent.agent_id.clone(),
+                ));
+            } else {
+                log::warn!("Agent {} has invalid printer configuration, skipping polling", agent.agent_id);
+            }
+        }
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let state = Arc::new(AppState::new());
-    let state_clone = Arc::clone(&state);
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(state)
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            let state = Arc::clone(&state_clone);
+            let state = Arc::new(AppState::new(app_handle.clone()));
+            let state_clone = Arc::clone(&state);
 
             setup_tray(&app_handle);
 
             tauri::async_runtime::spawn(async move {
-                setup_app(app_handle, state).await;
+                setup_app(app_handle, state_clone).await;
             });
 
             Ok(())
@@ -95,39 +134,25 @@ pub fn run() {
             commands::discover_network_printers,
             commands::fetch_shops,
             commands::list_agents,
+            commands::fetch_connected_agents,
+            commands::fetch_agents_from_api,
+            commands::auto_add_connected_agent,
+            commands::connect_to_existing_agent,
+            commands::fetch_pending_jobs,
+            commands::update_agent_printer_port,
             commands::get_config,
             commands::get_agent_status,
             commands::pair_device,
             commands::test_print,
             commands::unpair_device,
+            commands::test_printer_connection,
+            commands::remove_duplicate_agents,
         ])
         .run(tauri::generate_context!())
         .expect("Error running PrintAgent");
 }
 
 async fn setup_app(app_handle: tauri::AppHandle, state: Arc<AppState>) {
-    let data_dir = app_handle
-        .path()
-        .app_data_dir()
-        .expect("Cannot get app data dir");
-
-    std::fs::create_dir_all(&data_dir).expect("Cannot create data dir");
-
-    let db_path = data_dir.join("jobs.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-    match job_queue::init_db(&db_url).await {
-        Ok(pool) => {
-            log::info!("SQLite DB initialized at {:?}", db_path);
-            let mut pool_lock = state.db_pool.lock().await;
-            *pool_lock = Some(pool);
-        }
-        Err(e) => {
-            log::error!("Failed to init DB: {}", e);
-            return;
-        }
-    }
-
     let cfg = config::load_config(&app_handle);
 
     let window = app_handle.get_webview_window("main").unwrap();

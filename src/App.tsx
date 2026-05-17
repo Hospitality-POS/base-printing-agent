@@ -24,6 +24,7 @@ interface Config {
 }
 
 export default function App() {
+  const [shopId, setShopId] = useState<string>("");
   const [config, setConfig] = useState<Config | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -50,8 +51,11 @@ export default function App() {
   }
 
   if (!config || config.agents.length === 0) {
-    return <SetupScreen onPaired={() => invoke<Config>("get_config").then(setConfig)} />;
+    return <SetupScreen onPaired={(branchId) => {
+    setShopId(branchId);
+    invoke<Config>("get_config").then(setConfig);
+  }} />;
   }
 
-  return <StatusScreen config={config} onConfigChange={() => invoke<Config>("get_config").then(setConfig)} onShowSetup={() => setConfig(null)} />;
+  return <StatusScreen config={config} shopId={shopId} onShowSetup={() => setConfig(null)} />;
 }
