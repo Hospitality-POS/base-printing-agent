@@ -151,9 +151,27 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: ${{ needs.create-release.outputs.release_id }},
-              draft: false,
-            });
+            try {
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: ${{ needs.create-release.outputs.release_id }},
+                draft: false,
+              });
+            } catch (error) {
+              if (error.status === 404) {
+                console.log('Release not found, creating new release instead');
+                const tag = "${{ needs.create-release.outputs.tag }}";
+                await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tag,
+                  name: `PrintAgent ${tag}`,
+                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| macOS Apple Silicon | \`PrintAgent_*.aarch64.dmg\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select shop from dropdown, enter Zone and select your printer\n3. Click **Pair Device**`,
+                  draft: false,
+                  prerelease: false,
+                });
+              } else {
+                throw error;
+              }
+            }
