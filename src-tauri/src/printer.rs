@@ -41,16 +41,8 @@ pub fn get_available_ports() -> Vec<String> {
 }
 
 pub fn detect_thermal_printers() -> Vec<String> {
-    let ports = get_available_ports();
-    let mut detected = Vec::new();
-
-    for port_name in &ports {
-        if detect_printer_on_port(port_name) {
-            detected.push(port_name.clone());
-        }
-    }
-
-    detected
+    // Return all available ports so user can test each one
+    get_available_ports()
 }
 
 fn detect_printer_on_port(port_name: &str) -> bool {
