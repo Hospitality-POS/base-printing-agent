@@ -227,17 +227,10 @@ pub async fn fetch_connected_agents(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AgentDetailsResponse {
-    agent_id: String,
-    device_token: String,
-    ws_url: String,
-    company_id: String,
-}
-
 #[tauri::command]
 pub async fn auto_add_connected_agent(
     app_handle: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
+    _state: State<'_, Arc<AppState>>,
     agent_id: String,
     company_code: String,
     company_id: String,
@@ -335,7 +328,7 @@ pub async fn auto_add_connected_agent(
 }
 
 async fn sync_agent_to_api(
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
     agent: &config::AgentConfig,
     company_code: &str,
 ) -> Result<(), String> {
@@ -444,12 +437,6 @@ pub struct PendingJob {
     pub retry_count: i32,
     #[serde(rename = "created_at", default)]
     pub created_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PendingJobsResponse {
-    jobs: Vec<PendingJob>,
-    total: i32,
 }
 
 #[tauri::command]
@@ -860,7 +847,7 @@ pub async fn test_printer_connection(
     // Parse the address string to SocketAddr
     let socket_addr: SocketAddr = match address_str.parse() {
         Ok(addr) => addr,
-        Err(e) => {
+        Err(_e) => {
             // Try to resolve as hostname
             match (printer_host.as_str(), printer_network_port).to_socket_addrs() {
                 Ok(mut addrs) => {
