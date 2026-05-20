@@ -147,6 +147,7 @@ pub fn run() {
             commands::pair_device,
             commands::test_print,
             commands::unpair_device,
+            commands::unpair_all_agents,
             commands::test_printer_connection,
             commands::remove_duplicate_agents,
         ])

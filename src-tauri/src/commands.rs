@@ -883,6 +883,38 @@ pub async fn unpair_device(
 }
 
 #[tauri::command]
+pub async fn unpair_all_agents(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+    let agent_ids: Vec<String> = cfg.agents.iter().map(|a| a.agent_id.clone()).collect();
+
+    if agent_ids.is_empty() {
+        return Ok("No agents to unpair".to_string());
+    }
+
+    log::info!("Unpairing all agents: {:?}", agent_ids);
+
+    for agent_id in &agent_ids {
+        if let Err(e) = config::remove_agent(&app_handle, agent_id) {
+            log::error!("Failed to remove agent {}: {}", agent_id, e);
+        }
+    }
+
+    // Clear WebSocket connections
+    let mut connections = state.connections.lock().await;
+    connections.clear();
+    drop(connections);
+
+    // Delete config file
+    config::delete_config(&app_handle)?;
+
+    log::info!("All agents unpaired successfully");
+    Ok(format!("Unpaired {} agent(s)", agent_ids.len()))
+}
+
+#[tauri::command]
 pub async fn test_printer_connection(
     printer_host: String,
     printer_network_port: u16,

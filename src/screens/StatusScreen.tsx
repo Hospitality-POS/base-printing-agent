@@ -206,6 +206,20 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
     }
   };
 
+  const handleUnpairAll = async () => {
+    if (!confirm("Remove all agents? This will clear all local configurations.")) {
+      return;
+    }
+    try {
+      const result = await invoke<string>("unpair_all_agents");
+      alert(result);
+      onShowSetup();
+    } catch (e: unknown) {
+      console.error("Failed to unpair all agents:", e);
+      alert("Failed to unpair all agents: " + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-950 p-4 flex flex-col">
       {/* Header */}
@@ -222,6 +236,12 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={handleUnpairAll}
+            className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-medium transition-colors"
+          >
+            Unpair All
+          </button>
           <button
             onClick={onShowSetup}
             className="px-4 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg text-sm font-medium transition-colors"
