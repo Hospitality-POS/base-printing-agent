@@ -121,6 +121,7 @@ pub fn run() {
                 setup_app(app_handle, state_clone).await;
             });
 
+            app.manage(state);
             Ok(())
         })
         .on_window_event(|window, event| {
