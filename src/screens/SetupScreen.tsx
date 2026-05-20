@@ -13,6 +13,17 @@ interface Shop {
   shop_code?: string;
 }
 
+interface PortInfo {
+  name: string;
+  port_type: {
+    type_name: string;
+    vid?: number;
+    pid?: number;
+    manufacturer?: string;
+    product?: string;
+  };
+}
+
 interface ConnectedAgent {
   _id: string;
   agent_id: string;
@@ -55,7 +66,7 @@ export default function SetupScreen({ onPaired }: Props) {
   const [printerNetworkPort, setPrinterNetworkPort] = useState("9100");
   const [networkPrinters, setNetworkPrinters] = useState<string[]>([]);
   const [scanning, setScanning] = useState(false);
-  const [availablePorts, setAvailablePorts] = useState<string[]>([]);
+  const [availablePorts, setAvailablePorts] = useState<PortInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [testPrinting, setTestPrinting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,10 +77,10 @@ export default function SetupScreen({ onPaired }: Props) {
   const loadPorts = async () => {
     setPortsLoading(true);
     try {
-      const ports = await invoke<string[]>("get_available_ports");
+      const ports = await invoke<PortInfo[]>("get_available_ports");
       setAvailablePorts(ports);
       if (ports.length > 0 && !printerPort) {
-        setPrinterPort(ports[0]);
+        setPrinterPort(ports[0].name);
       }
     } catch (e) {
       setAvailablePorts([]);
@@ -81,7 +92,7 @@ export default function SetupScreen({ onPaired }: Props) {
   const detectPrinters = async () => {
     setDetectingPrinters(true);
     try {
-      const detected = await invoke<string[]>("detect_thermal_printers");
+      const detected = await invoke<PortInfo[]>("detect_thermal_printers");
       setAvailablePorts(detected);
       if (detected.length > 0) {
         setSuccess(`Detected ${detected.length} thermal printer(s) - select one below`);
@@ -506,7 +517,7 @@ export default function SetupScreen({ onPaired }: Props) {
                             <option value="">No ports found — type manually below</option>
                           ) : (
                             availablePorts.map((p) => (
-                              <option key={p} value={p}>{p}</option>
+                              <option key={p.name} value={p.name}>{p.name}</option>
                             ))
                           )}
                         </select>
@@ -547,40 +558,93 @@ export default function SetupScreen({ onPaired }: Props) {
                       {availablePorts.length > 0 && (
                         <div className="mt-3">
                           <label className="block text-xs text-gray-400 mb-2">Detected Printers</label>
-                          <div className="space-y-1">
-                            {availablePorts.map((port) => (
-                              <div key={port} className="flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setPrinterPort(port)}
-                                  className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
-                                    printerPort === port
-                                      ? "bg-blue-600/20 border-blue-500 text-blue-400"
-                                      : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
-                                  }`}
-                                >
-                                  {port}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={async () => {
-                                    try {
-                                      await invoke("test_print", { 
-                                        printerType: "serial",
-                                        printerPort: port
-                                      });
-                                      setSuccess(`Test print sent to ${port}`);
-                                    } catch (e: unknown) {
-                                      setError(e instanceof Error ? e.message : String(e));
-                                    }
-                                  }}
-                                  className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
-                                >
-                                  Test
-                                </button>
+                          
+                          {/* USB Ports */}
+                          {availablePorts.filter(p => p.port_type.type_name === 'USB').length > 0 && (
+                            <div className="mb-3">
+                              <label className="block text-xs text-blue-400 mb-1">USB Ports</label>
+                              <div className="space-y-1">
+                                {availablePorts.filter(p => p.port_type.type_name === 'USB').map((port) => (
+                                  <div key={port.name} className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setPrinterPort(port.name)}
+                                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                                        printerPort === port.name
+                                          ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                                      }`}
+                                    >
+                                      <div className="font-medium">{port.name}</div>
+                                      {port.port_type.manufacturer && (
+                                        <div className="text-xs text-gray-500">
+                                          {port.port_type.manufacturer} - {port.port_type.product || ''}
+                                        </div>
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          await invoke("test_print", { 
+                                            printerType: "serial",
+                                            printerPort: port.name
+                                          });
+                                          setSuccess(`Test print sent to ${port.name}`);
+                                        } catch (e: unknown) {
+                                          setError(e instanceof Error ? e.message : String(e));
+                                        }
+                                      }}
+                                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                                    >
+                                      Test
+                                    </button>
+                                  </div>
+                                ))}
                               </div>
-                            ))}
-                          </div>
+                            </div>
+                          )}
+
+                          {/* COM/Serial Ports */}
+                          {availablePorts.filter(p => p.port_type.type_name === 'COM/Serial').length > 0 && (
+                            <div>
+                              <label className="block text-xs text-green-400 mb-1">COM / Serial Ports</label>
+                              <div className="space-y-1">
+                                {availablePorts.filter(p => p.port_type.type_name === 'COM/Serial').map((port) => (
+                                  <div key={port.name} className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setPrinterPort(port.name)}
+                                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                                        printerPort === port.name
+                                          ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                                      }`}
+                                    >
+                                      {port.name}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          await invoke("test_print", { 
+                                            printerType: "serial",
+                                            printerPort: port.name
+                                          });
+                                          setSuccess(`Test print sent to ${port.name}`);
+                                        } catch (e: unknown) {
+                                          setError(e instanceof Error ? e.message : String(e));
+                                        }
+                                      }}
+                                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                                    >
+                                      Test
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </Field>
@@ -793,7 +857,7 @@ export default function SetupScreen({ onPaired }: Props) {
                         <option value="">No ports found — type manually below</option>
                       ) : (
                         availablePorts.map((p) => (
-                          <option key={p} value={p}>{p}</option>
+                          <option key={p.name} value={p.name}>{p.name}</option>
                         ))
                       )}
                     </select>

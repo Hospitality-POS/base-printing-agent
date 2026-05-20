@@ -106,7 +106,7 @@ pub fn get_available_ports() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn detect_thermal_printers() -> Vec<String> {
+pub fn detect_thermal_printers() -> Vec<printer::PortInfo> {
     printer::detect_thermal_printers()
 }
 

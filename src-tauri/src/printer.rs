@@ -2,6 +2,8 @@ use crate::commands::PrintJob;
 use serialport::SerialPort;
 use std::io::Write;
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use serialport::SerialPortType;
 
 const ESC: u8 = 0x1B;
 const GS: u8 = 0x1D;
@@ -40,9 +42,64 @@ pub fn get_available_ports() -> Vec<String> {
     }
 }
 
-pub fn detect_thermal_printers() -> Vec<String> {
-    // Return all available ports so user can test each one
-    get_available_ports()
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PortInfo {
+    pub name: String,
+    pub port_type: PortType,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PortType {
+    pub type_name: String,
+    pub vid: Option<u16>,
+    pub pid: Option<u16>,
+    pub manufacturer: Option<String>,
+    pub product: Option<String>,
+}
+
+pub fn detect_thermal_printers() -> Vec<PortInfo> {
+    let ports_info = match serialport::available_ports() {
+        Ok(ports) => ports,
+        Err(_) => return vec![],
+    };
+
+    ports_info.iter().map(|p| {
+        let port_type = match &p.port_type {
+            SerialPortType::UsbPort(info) => PortType {
+                type_name: "USB".to_string(),
+                vid: Some(info.vid),
+                pid: Some(info.pid),
+                manufacturer: info.manufacturer.clone(),
+                product: info.product.clone(),
+            },
+            SerialPortType::PciPort => PortType {
+                type_name: "PCI".to_string(),
+                vid: None,
+                pid: None,
+                manufacturer: None,
+                product: None,
+            },
+            SerialPortType::BluetoothPort => PortType {
+                type_name: "Bluetooth".to_string(),
+                vid: None,
+                pid: None,
+                manufacturer: None,
+                product: None,
+            },
+            _ => PortType {
+                type_name: "COM/Serial".to_string(),
+                vid: None,
+                pid: None,
+                manufacturer: None,
+                product: None,
+            },
+        };
+
+        PortInfo {
+            name: p.port_name.clone(),
+            port_type,
+        }
+    }).collect()
 }
 
 fn detect_printer_on_port(port_name: &str) -> bool {
