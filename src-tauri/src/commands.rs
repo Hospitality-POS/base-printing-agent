@@ -586,12 +586,48 @@ pub async fn pair_device(
 
     let client = reqwest::Client::new();
 
+    // Check if we already have an agent for this zone locally
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+    let existing_agent = cfg.agents.iter().find(|a| a.zone == zone && a.branch_id == branch_id);
+
+    if let Some(agent) = existing_agent {
+        log::info!("Found existing local agent for zone {}, updating printer configuration", zone);
+        // Update the existing agent's configuration with new printer settings
+        let updated_agent = config::AgentConfig {
+            agent_id: agent.agent_id.clone(),
+            company_id: agent.company_id.clone(),
+            company_code: agent.company_code.clone(),
+            branch_id: agent.branch_id.clone(),
+            zone: agent.zone.clone(),
+            device_name: device_name.clone(),
+            device_token: agent.device_token.clone(),
+            printer_port,
+            paper_width: 80,
+            ws_url: agent.ws_url.clone(),
+            printer_type,
+            printer_host,
+            printer_network_port,
+        };
+
+        // Update the config by removing the old agent and adding the updated one
+        config::remove_agent(&app_handle, &agent.agent_id)?;
+        config::add_agent(&app_handle, updated_agent)?;
+
+        log::info!("Agent printer configuration updated, restarting WebSocket loop for all agents...");
+        let new_cfg = config::load_config(&app_handle).unwrap_or_default();
+        start_ws_loop(state.inner().clone(), &new_cfg).await;
+
+        return Ok(());
+    }
+
     let body = serde_json::json!({
         "companyCode": company_code,
         "branchId": branch_id,
         "zone": zone,
         "deviceName": device_name,
     });
+
+    log::info!("Pairing request to API: {} with body: {}", format!("{}/api/agents/pair", api_base), body);
 
     let resp = client
         .post(format!("{}/api/agents/pair", api_base))
@@ -601,9 +637,11 @@ pub async fn pair_device(
         .await
         .map_err(|e| format!("Pairing request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    log::info!("Pairing response status: {}, body: {}", status, text);
+
+    if !status.is_success() {
         
         // Handle 409 Conflict - agent already paired for this zone
         if status.as_u16() == 409 {
@@ -735,7 +773,8 @@ pub async fn pair_device(
             }
         }
         
-        return Err(format!("Pairing failed ({}): {}", status, text));
+        log::error!("Pairing failed - Status: {}, Response: {}", status, text);
+        return Err(format!("Pairing failed with HTTP status {}. API Response: {}. This could mean: 1) Invalid company code, 2) Branch not found, 3) Zone already paired with another device, 4) Server error. Please check the logs for the full API request details.", status, text));
     }
 
     let pair_resp: PairResponse = resp
