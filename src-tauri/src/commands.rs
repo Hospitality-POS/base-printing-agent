@@ -638,10 +638,11 @@ pub async fn pair_device(
         .map_err(|e| format!("Pairing request failed: {}", e))?;
 
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    log::info!("Pairing response status: {}, body: {}", status, text);
+    log::info!("Pairing response status: {}", status);
 
     if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        log::info!("Pairing error response body: {}", text);
         
         // Handle 409 Conflict - agent already paired for this zone
         if status.as_u16() == 409 {
