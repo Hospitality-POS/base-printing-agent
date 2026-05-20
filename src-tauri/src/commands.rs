@@ -225,8 +225,6 @@ pub async fn fetch_connected_agents(
         .map_err(|e| format!("Failed to serialize connected agents: {}", e))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 #[tauri::command]
 pub async fn auto_add_connected_agent(
     app_handle: tauri::AppHandle,
