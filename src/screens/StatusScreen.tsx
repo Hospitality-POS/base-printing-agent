@@ -22,60 +22,30 @@ interface Props {
   onShowSetup: () => void;
 }
 
+interface Agent {
+  agentId: string;
+  zone: string;
+  deviceName: string;
+  branchId: string;
+  companyCode: string;
+  printerType: string;
+  printerPort?: string;
+  printerHost?: string;
+  printerNetworkPort?: number;
+}
+
 export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
   const { statuses, loading } = useAgentStatus();
-  const [agents, setAgents] = useState<Array<{
-    agentId: string;
-    zone: string;
-    deviceName: string;
-    branchId: string;
-    companyCode: string;
-    printerType: string;
-    printerPort?: string;
-    printerHost?: string;
-    printerNetworkPort?: number;
-  }>>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [unpairConfirm, setUnpairConfirm] = useState<{ agentId: string | null }>({ agentId: null });
   const [unpairAllConfirm, setUnpairAllConfirm] = useState(false);
-
-  // Fetch agents from API on mount
-  React.useEffect(() => {
-    const fetchAgents = async () => {
-      try {
-        const shopIdToUse = shopId || config.agents[0]?.branchId || "6a06e94aa2c6c63b9b080e00";
-        console.log("Fetching agents from API with shopId:", shopIdToUse);
-        const fetchedAgents = await invoke<any[]>("fetch_agents_from_api", { shopId: shopIdToUse, companyCode: config.agents[0]?.companyCode || "BP-358003" });
-        console.log("Fetched agents from API:", fetchedAgents.length);
-        setAgents(fetchedAgents.map((a: any) => ({
-          agentId: a.agent_id,
-          zone: a.zone,
-          deviceName: a.device_name,
-          branchId: a.shop_id,
-          companyCode: a.company_code,
-          printerType: a.printer_type || "serial",
-          printerPort: a.printer_port,
-          printerHost: a.printer_host,
-          printerNetworkPort: a.printer_network_port,
-        })));
-      } catch (e) {
-        console.error("Failed to fetch agents from API:", e);
-        // Fall back to local config if API fails
-        console.log("Falling back to local config, agents:", config.agents.length);
-        setAgents(config.agents);
-      }
-    };
-    fetchAgents();
-  }, [config.agents]);
-
-  React.useEffect(() => {
-    console.log("StatusScreen mounted, agent count:", agents.length);
-  }, [agents.length]);
-
   const [testPrinting, setTestPrinting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
+  const [windowsPrinters, setWindowsPrinters] = useState<string[]>([]);
+  const [loadingWindowsPrinters, setLoadingWindowsPrinters] = useState(false);
   const [printerConfig, setPrinterConfig] = useState<{
     printerPort: string;
     printerType: string;
@@ -89,6 +59,53 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
   });
   const [savingConfig, setSavingConfig] = useState(false);
   const [configResult, setConfigResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const mapAgent = (a: any): Agent => ({
+    agentId: a.agent_id,
+    zone: a.zone,
+    deviceName: a.device_name,
+    branchId: a.shop_id,
+    companyCode: a.company_code,
+    printerType: a.printer_type || "serial",
+    printerPort: a.printer_port,
+    printerHost: a.printer_host,
+    printerNetworkPort: a.printer_network_port,
+  });
+
+  const fetchAgents = async (overrideShopId?: string) => {
+    try {
+      const shopIdToUse = overrideShopId || shopId || config.agents[0]?.branchId || "";
+      const companyCode = config.agents[0]?.companyCode || "";
+      const fetched = await invoke<any[]>("fetch_agents_from_api", {
+        shopId: shopIdToUse,
+        companyCode,
+      });
+      setAgents(fetched.map(mapAgent));
+    } catch (e) {
+      console.error("Failed to fetch agents from API:", e);
+      setAgents(config.agents);
+    }
+  };
+
+  React.useEffect(() => {
+    fetchAgents();
+  }, [config.agents]);
+
+  const loadWindowsPrinters = async () => {
+    setLoadingWindowsPrinters(true);
+    try {
+      const printers = await invoke<string[]>("list_windows_printers");
+      setWindowsPrinters(printers);
+      if (printers.length === 0) {
+        setConfigResult({ ok: false, msg: "No Windows printers found. Make sure your printer driver is installed." });
+      }
+    } catch (e) {
+      setWindowsPrinters([]);
+      setConfigResult({ ok: false, msg: "Failed to load Windows printers: " + String(e) });
+    } finally {
+      setLoadingWindowsPrinters(false);
+    }
+  };
 
   const handleTestPrint = async (agentId: string) => {
     setTestPrinting(true);
@@ -104,7 +121,7 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
     }
   };
 
-  const handleTestConnection = async (agent: any) => {
+  const handleTestConnection = async (agent: Agent) => {
     if (agent.printerType !== "network" || !agent.printerHost) {
       alert("Connection test only works for network printers with configured IP");
       return;
@@ -123,8 +140,9 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
     }
   };
 
-  const handleEditPrinter = (agent: any) => {
+  const handleEditPrinter = (agent: Agent) => {
     setEditingAgentId(agent.agentId);
+    setWindowsPrinters([]);
     setPrinterConfig({
       printerPort: agent.printerPort || "",
       printerType: agent.printerType || "serial",
@@ -132,44 +150,31 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
       printerNetworkPort: agent.printerNetworkPort?.toString() || "9100",
     });
     setConfigResult(null);
+    // Auto-load Windows printers if agent is already configured as windows type
+    if (agent.printerType === "windows") {
+      loadWindowsPrinters();
+    }
   };
 
   const handleSavePrinter = async () => {
-    console.log("Save printer button clicked for agent:", editingAgentId);
     setSavingConfig(true);
     setConfigResult(null);
     try {
       const agent = agents.find(a => a.agentId === editingAgentId);
-      console.log("Agent found:", agent);
-      console.log("Printer config:", printerConfig);
-      console.log("Calling update_agent_printer_port command");
       await invoke("update_agent_printer_port", {
         agentId: editingAgentId,
         printerPort: printerConfig.printerPort,
         printerType: printerConfig.printerType,
         printerHost: printerConfig.printerType === "network" ? printerConfig.printerHost : null,
-        printerNetworkPort: printerConfig.printerType === "network" ? parseInt(printerConfig.printerNetworkPort) : null,
+        printerNetworkPort: printerConfig.printerType === "network"
+          ? parseInt(printerConfig.printerNetworkPort)
+          : null,
         companyCode: agent?.companyCode || "",
       });
-      console.log("Printer config saved successfully");
-      setConfigResult({ ok: true, msg: "Printer configuration saved to API!" });
+      setConfigResult({ ok: true, msg: "Printer configuration saved!" });
       setEditingAgentId(null);
-      // Refresh agents from API
-      const shopIdToUse = shopId || agent?.branchId || "67841c7f52c7b8888375503b";
-      const fetchedAgents = await invoke<any[]>("fetch_agents_from_api", { shopId: shopIdToUse });
-      setAgents(fetchedAgents.map((a: any) => ({
-        agentId: a.agent_id,
-        zone: a.zone,
-        deviceName: a.device_name,
-        branchId: a.shop_id,
-        companyCode: a.company_code,
-        printerType: a.printer_type || "serial",
-        printerPort: a.printer_port,
-        printerHost: a.printer_host,
-        printerNetworkPort: a.printer_network_port,
-      })));
+      await fetchAgents(agent?.branchId);
     } catch (e: unknown) {
-      console.error("Failed to save printer config:", e);
       setConfigResult({ ok: false, msg: e instanceof Error ? e.message : String(e) });
     } finally {
       setSavingConfig(false);
@@ -177,40 +182,16 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
     }
   };
 
-  const handleUnpair = async (agentId: string) => {
-    setUnpairConfirm({ agentId });
-  };
-
   const confirmUnpair = async () => {
     const agentId = unpairConfirm.agentId;
     if (!agentId) return;
-    
-    console.log("Calling unpair_device command");
     try {
       await invoke("unpair_device", { agentId });
-      console.log("Unpair successful");
-      // Refresh agents from API
-      const shopIdToUse = shopId || "67841c7f52c7b8888375503b";
-      const fetchedAgents = await invoke<any[]>("fetch_agents_from_api", { shopId: shopIdToUse });
-      setAgents(fetchedAgents.map((a: any) => ({
-        agentId: a.agent_id,
-        zone: a.zone,
-        deviceName: a.device_name,
-        branchId: a.shop_id,
-        companyCode: a.company_code,
-        printerType: a.printer_type || "serial",
-        printerPort: a.printer_port,
-        printerHost: a.printer_host,
-        printerNetworkPort: a.printer_network_port,
-      })));
+      await fetchAgents();
       setUnpairConfirm({ agentId: null });
     } catch (e: unknown) {
       console.error("Failed to unpair:", e);
     }
-  };
-
-  const handleUnpairAll = async () => {
-    setUnpairAllConfirm(true);
   };
 
   const confirmUnpairAll = async () => {
@@ -220,9 +201,14 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
       setAgents([]);
       setUnpairAllConfirm(false);
     } catch (e: unknown) {
-      console.error("Failed to unpair all agents:", e);
       alert("Failed to unpair all agents: " + (e instanceof Error ? e.message : String(e)));
     }
+  };
+
+  const hasValidPrinter = (agent: Agent) => {
+    if (agent.printerType === "network") return !!(agent.printerHost && agent.printerNetworkPort);
+    if (agent.printerType === "windows") return !!(agent.printerPort);
+    return !!(agent.printerPort);
   };
 
   return (
@@ -242,7 +228,7 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={handleUnpairAll}
+            onClick={() => setUnpairAllConfirm(true)}
             className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-medium transition-colors"
           >
             Unpair All
@@ -269,32 +255,27 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
             const status = statuses.find(s => s.agentId === agent.agentId);
             const wsConnected = status?.wsConnected ?? false;
             const queueCount = status?.queueCount ?? 0;
-            // Agent is considered "connected" if it has WebSocket credentials OR if it's polling (has branch_id and zone)
             const isPolling = !wsConnected && agent.branchId && agent.zone;
             const connected = wsConnected || isPolling;
-            // Check if printer configuration is valid
-            const hasValidPrinter = agent.printerType === "network"
-              ? !!(agent.printerHost && agent.printerNetworkPort)
-              : !!(agent.printerPort);
+            const validPrinter = hasValidPrinter(agent);
 
             return (
               <div key={agent.agentId} className="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
-                <div 
+                {/* Agent Header Row */}
+                <div
                   className="p-4 cursor-pointer hover:bg-gray-800/50 transition-colors"
                   onClick={() => setExpandedAgentId(expandedAgentId === agent.agentId ? null : agent.agentId)}
                 >
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
                         <h3 className="text-white font-medium">{agent.deviceName}</h3>
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          connected
-                            ? "bg-green-500/20 text-green-400"
-                            : "bg-red-500/20 text-red-400"
+                          connected ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"
                         }`}>
                           {isPolling ? "Polling" : wsConnected ? "Connected" : "Disconnected"}
                         </span>
-                        {!hasValidPrinter && (
+                        {!validPrinter && (
                           <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400">
                             Configure Printer
                           </span>
@@ -302,55 +283,67 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
                       </div>
                       <p className="text-gray-400 text-sm">{agent.zone} • {agent.agentId.slice(0, 8)}...</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <svg className={`w-4 h-4 text-gray-500 transition-transform ${expandedAgentId === agent.agentId ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </div>
+                    <svg
+                      className={`w-4 h-4 text-gray-500 transition-transform ${expandedAgentId === agent.agentId ? "rotate-180" : ""}`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
                   </div>
-
-                  <div className="flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-1.5 text-gray-400">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                        </svg>
-                        Queue: {queueCount}
-                      </div>
-                    </div>
+                  <div className="flex items-center gap-1.5 text-gray-400 text-sm">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                    </svg>
+                    Queue: {queueCount}
                   </div>
                 </div>
 
+                {/* Expanded Panel */}
                 {expandedAgentId === agent.agentId && (
                   <div className="p-4 pt-0 border-t border-gray-800">
+
+                    {/* Edit Form */}
                     {editingAgentId === agent.agentId ? (
                       <div className="space-y-3 mb-3">
+
+                        {/* Printer Type */}
                         <div>
                           <label className="text-gray-500 text-xs mb-1 block">Printer Type</label>
                           <select
                             value={printerConfig.printerType}
-                            onChange={(e) => setPrinterConfig({ ...printerConfig, printerType: e.target.value })}
+                            onChange={(e) => {
+                              const t = e.target.value;
+                              setPrinterConfig({ ...printerConfig, printerType: t, printerPort: "" });
+                              setWindowsPrinters([]);
+                              if (t === "windows") loadWindowsPrinters();
+                            }}
                             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
                           >
-                            <option value="serial">Serial</option>
-                            <option value="network">Network</option>
+                            <option value="serial">Serial / USB (COM port)</option>
+                            <option value="network">Network (TCP/IP)</option>
+                            <option value="windows">Windows Printer</option>
                           </select>
                         </div>
-                        {printerConfig.printerType === "serial" ? (
+
+                        {/* Serial */}
+                        {printerConfig.printerType === "serial" && (
                           <div>
                             <label className="text-gray-500 text-xs mb-1 block">Printer Port</label>
                             <input
                               type="text"
                               value={printerConfig.printerPort}
                               onChange={(e) => setPrinterConfig({ ...printerConfig, printerPort: e.target.value })}
-                              placeholder="/dev/tty.usbserial-xxx"
+                              placeholder="e.g. COM3 or /dev/ttyUSB0"
                               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
                             />
                           </div>
-                        ) : (
+                        )}
+
+                        {/* Network */}
+                        {printerConfig.printerType === "network" && (
                           <>
                             <div>
-                              <label className="text-gray-500 text-xs mb-1 block">Printer Host/IP</label>
+                              <label className="text-gray-500 text-xs mb-1 block">Printer Host / IP</label>
                               <input
                                 type="text"
                                 value={printerConfig.printerHost}
@@ -360,7 +353,7 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
                               />
                             </div>
                             <div>
-                              <label className="text-gray-500 text-xs mb-1 block">Printer Port</label>
+                              <label className="text-gray-500 text-xs mb-1 block">TCP Port</label>
                               <input
                                 type="text"
                                 value={printerConfig.printerNetworkPort}
@@ -371,6 +364,77 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
                             </div>
                           </>
                         )}
+
+                        {/* Windows Printer */}
+                        {printerConfig.printerType === "windows" && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-gray-500 text-xs">Windows Printer Name</label>
+                              <button
+                                onClick={loadWindowsPrinters}
+                                disabled={loadingWindowsPrinters}
+                                className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
+                              >
+                                {loadingWindowsPrinters ? "Loading..." : "↻ Refresh"}
+                              </button>
+                            </div>
+
+                            {windowsPrinters.length > 0 ? (
+                              <div className="space-y-1 mb-2">
+                                {windowsPrinters.map((name) => (
+                                  <div key={name} className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setPrinterConfig({ ...printerConfig, printerPort: name })}
+                                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                                        printerConfig.printerPort === name
+                                          ? "bg-green-600/20 border-green-500 text-green-400"
+                                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                                      }`}
+                                    >
+                                      {name}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          await invoke("test_print", {
+                                            printerType: "windows",
+                                            printerPort: name,
+                                          });
+                                          setConfigResult({ ok: true, msg: `Test print sent to ${name}` });
+                                        } catch (e: unknown) {
+                                          setConfigResult({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+                                        }
+                                      }}
+                                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                                    >
+                                      Test
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-gray-500 mb-2">
+                                {loadingWindowsPrinters ? "Loading..." : "Click Refresh to load installed Windows printers"}
+                              </p>
+                            )}
+
+                            {/* Manual entry fallback */}
+                            <input
+                              type="text"
+                              value={printerConfig.printerPort}
+                              onChange={(e) => setPrinterConfig({ ...printerConfig, printerPort: e.target.value })}
+                              placeholder="Or type printer name manually"
+                              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">
+                              Must match exactly the name in Windows → Printers & Scanners
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Save / Cancel */}
                         <div className="flex items-center gap-2">
                           <button
                             onClick={handleSavePrinter}
@@ -380,23 +444,24 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
                             {savingConfig ? "Saving..." : "Save to API"}
                           </button>
                           <button
-                            onClick={() => setEditingAgentId(null)}
+                            onClick={() => { setEditingAgentId(null); setWindowsPrinters([]); }}
                             className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors"
                           >
                             Cancel
                           </button>
                         </div>
+
                         {configResult && (
                           <div className={`p-2 rounded-lg text-xs ${
-                            configResult.ok
-                              ? "bg-green-500/10 text-green-400"
-                              : "bg-red-500/10 text-red-400"
+                            configResult.ok ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
                           }`}>
                             {configResult.msg}
                           </div>
                         )}
                       </div>
+
                     ) : (
+                      /* Info View */
                       <>
                         <div className="grid grid-cols-2 gap-3 mb-3">
                           <div className="bg-gray-800/50 rounded-lg p-3">
@@ -411,26 +476,26 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
                             <p className="text-gray-500 text-xs mb-1">Printer Type</p>
                             <p className="text-white text-sm capitalize">{agent.printerType}</p>
                           </div>
-                          {agent.printerType === "network" && agent.printerHost ? (
-                            <div className="bg-gray-800/50 rounded-lg p-3">
-                              <p className="text-gray-500 text-xs mb-1">Printer IP</p>
-                              <p className="text-white text-sm">{agent.printerHost}</p>
-                            </div>
-                          ) : (
-                            <div className="bg-gray-800/50 rounded-lg p-3">
-                              <p className="text-gray-500 text-xs mb-1">Printer Port</p>
-                              <p className="text-white text-sm truncate">{agent.printerPort || "Not configured"}</p>
-                            </div>
-                          )}
+                          <div className="bg-gray-800/50 rounded-lg p-3">
+                            <p className="text-gray-500 text-xs mb-1">
+                              {agent.printerType === "network" ? "Printer IP" : "Printer Port / Name"}
+                            </p>
+                            <p className="text-white text-sm truncate">
+                              {agent.printerType === "network"
+                                ? agent.printerHost || "Not configured"
+                                : agent.printerPort || "Not configured"}
+                            </p>
+                          </div>
                         </div>
-                        <div className="flex items-center justify-between">
+
+                        <div className="flex items-center justify-between flex-wrap gap-2">
                           <button
-                            onClick={() => handleUnpair(agent.agentId)}
+                            onClick={() => setUnpairConfirm({ agentId: agent.agentId })}
                             className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm font-medium transition-colors"
                           >
                             Remove Agent
                           </button>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             {agent.printerType === "network" && agent.printerHost && (
                               <button
                                 onClick={() => handleTestConnection(agent)}
@@ -485,13 +550,13 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
         </div>
       )}
 
-      {/* Unpair Confirmation Modal */}
+      {/* Unpair Single Confirmation Modal */}
       {unpairConfirm.agentId && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-sm w-full mx-4">
             <h3 className="text-lg font-semibold text-white mb-2">Remove Agent</h3>
             <p className="text-gray-400 text-sm mb-6">
-              Are you sure you want to remove agent {unpairConfirm.agentId}? This will disconnect the printer from this device.
+              Are you sure you want to remove this agent? This will disconnect the printer from this device.
             </p>
             <div className="flex gap-3">
               <button

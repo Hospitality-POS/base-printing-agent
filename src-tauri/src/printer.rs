@@ -111,6 +111,7 @@ pub fn list_windows_printers() -> Vec<String> {
         let output = Command::new("powershell")
             .args([
                 "-NoProfile",
+                "-NonInteractive",
                 "-Command",
                 "Get-Printer | Select-Object -ExpandProperty Name",
             ])
@@ -244,41 +245,151 @@ fn write_to_windows_printer(printer_name: &str, bytes: &[u8]) -> Result<(), Stri
         use std::fs;
         use std::process::Command;
 
-        // Write ESC/POS bytes to a temp file
+        // Write ESC/POS bytes to temp file
         let temp_path = std::env::temp_dir().join("print_agent_job.bin");
         fs::write(&temp_path, bytes)
             .map_err(|e| format!("Failed to write temp print file: {}", e))?;
 
-        // Use COPY /B to send raw bytes to the Windows printer
-        let cmd = format!(
-            "copy /b \"{}\" \"\\\\\\\\?\\\\{}\"",
-            temp_path.display(),
-            printer_name
-        );
+        let temp_str = temp_path.display().to_string();
 
-        let output = Command::new("cmd")
-            .args(["/C", &cmd])
-            .output()
-            .map_err(|e| format!("Failed to run print command: {}", e))?;
+        // Step 1: Try to get the printer's physical port (COM1, USB001, LPT1 etc.)
+        let get_port_output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-Printer -Name '{}' -ErrorAction SilentlyContinue).PortName",
+                    printer_name
+                ),
+            ])
+            .output();
 
-        // Clean up temp file
+        let port_name = get_port_output
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        log::info!("Printer '{}' uses port: '{}'", printer_name, port_name);
+
+        // Step 2: If it's a physical USB/COM/LPT port, write directly to it
+        let result = if !port_name.is_empty()
+            && (port_name.starts_with("COM")
+                || port_name.starts_with("USB")
+                || port_name.starts_with("LPT"))
+        {
+            log::info!("Writing directly to physical port: {}", port_name);
+            let port_path = format!("\\\\.\\{}", port_name);
+            match fs::OpenOptions::new().write(true).open(&port_path) {
+                Ok(mut f) => f
+                    .write_all(bytes)
+                    .map_err(|e| format!("Failed to write to port {}: {}", port_name, e)),
+                Err(e) => {
+                    log::warn!("Direct port write failed: {}, falling back to WinSpool", e);
+                    // Fall through to WinSpool API below
+                    winspool_raw_print(printer_name, &temp_str)
+                }
+            }
+        } else {
+            // Step 3: Use Windows Spooler API via PowerShell P/Invoke for all other cases
+            // (USB001 virtual ports, network printers, PDF printers etc.)
+            winspool_raw_print(printer_name, &temp_str)
+        };
+
         let _ = fs::remove_file(&temp_path);
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!(
-                "Windows print command failed. stdout: {} stderr: {}",
-                stdout, stderr
-            ));
-        }
-
-        Ok(())
+        result
     }
     #[cfg(not(target_os = "windows"))]
     {
         Err("Windows printer not supported on this platform".to_string())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn winspool_raw_print(printer_name: &str, temp_file_path: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    // Use Windows Spooler API (winspool.drv) via PowerShell Add-Type P/Invoke
+    // This is the correct way to send raw ESC/POS bytes to any Windows printer
+    let script = format!(
+        r#"
+$bytes = [System.IO.File]::ReadAllBytes('{temp}');
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class RawPrinterHelper {{
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern bool ClosePrinter(IntPtr hPrinter);
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern int StartDocPrinter(IntPtr hPrinter, int Level, ref DOCINFO pDocInfo);
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern bool EndDocPrinter(IntPtr hPrinter);
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern bool StartPagePrinter(IntPtr hPrinter);
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern bool EndPagePrinter(IntPtr hPrinter);
+    [DllImport("winspool.drv", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
+    public struct DOCINFO {{
+        [MarshalAs(UnmanagedType.LPTStr)] public string pDocName;
+        [MarshalAs(UnmanagedType.LPTStr)] public string pOutputFile;
+        [MarshalAs(UnmanagedType.LPTStr)] public string pDataType;
+    }}
+}}
+'@ -ErrorAction Stop;
+$hPrinter = [IntPtr]::Zero;
+$opened = [RawPrinterHelper]::OpenPrinter('{name}', [ref]$hPrinter, [IntPtr]::Zero);
+if (-not $opened) {{ throw "OpenPrinter failed for '{name}'" }};
+$docInfo = New-Object RawPrinterHelper+DOCINFO;
+$docInfo.pDocName  = 'PrintAgentJob';
+$docInfo.pDataType = 'RAW';
+$docInfo.pOutputFile = $null;
+$docId = [RawPrinterHelper]::StartDocPrinter($hPrinter, 1, [ref]$docInfo);
+if ($docId -le 0) {{ [RawPrinterHelper]::ClosePrinter($hPrinter); throw "StartDocPrinter failed" }};
+[RawPrinterHelper]::StartPagePrinter($hPrinter) | Out-Null;
+$written = 0;
+$ok = [RawPrinterHelper]::WritePrinter($hPrinter, $bytes, $bytes.Length, [ref]$written);
+[RawPrinterHelper]::EndPagePrinter($hPrinter) | Out-Null;
+[RawPrinterHelper]::EndDocPrinter($hPrinter) | Out-Null;
+[RawPrinterHelper]::ClosePrinter($hPrinter) | Out-Null;
+if (-not $ok) {{ throw "WritePrinter failed - $written bytes written of $($bytes.Length)" }};
+Write-Output "OK: $written bytes sent to '{name}'";
+"#,
+        temp = temp_file_path.replace('\\', "\\\\"),
+        name = printer_name.replace('\'', "\\'")
+    );
+
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to spawn PowerShell: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    log::info!("WinSpool stdout: {}", stdout);
+    if !stderr.is_empty() {
+        log::warn!("WinSpool stderr: {}", stderr);
+    }
+
+    if !output.status.success() || stdout.is_empty() || !stdout.contains("OK:") {
+        return Err(format!(
+            "WinSpool raw print failed.\nstdout: {}\nstderr: {}",
+            stdout, stderr
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn format_receipt(job: &PrintJob) -> Vec<u8> {
