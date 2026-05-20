@@ -132,6 +132,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_available_ports,
+            commands::detect_thermal_printers,
             commands::discover_network_printers,
             commands::fetch_shops,
             commands::list_agents,

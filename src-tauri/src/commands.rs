@@ -106,6 +106,11 @@ pub fn get_available_ports() -> Vec<String> {
 }
 
 #[tauri::command]
+pub fn detect_thermal_printers() -> Vec<String> {
+    printer::detect_thermal_printers()
+}
+
+#[tauri::command]
 pub async fn discover_network_printers() -> Vec<String> {
     printer::discover_network_printers().await
 }
@@ -800,7 +805,12 @@ pub async fn pair_device(
         printer_network_port,
     };
 
-    config::add_agent(&app_handle, new_agent)?;
+    config::add_agent(&app_handle, new_agent.clone())?;
+
+    log::info!("Agent added, syncing printer configuration to server...");
+    if let Err(e) = sync_agent_to_api(&app_handle, &new_agent, &company_code).await {
+        log::error!("Failed to sync printer configuration to server: {}", e);
+    }
 
     log::info!("Agent added, starting WebSocket loop for all agents...");
     let cfg = config::load_config(&app_handle).unwrap_or_default();

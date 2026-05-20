@@ -40,6 +40,41 @@ pub fn get_available_ports() -> Vec<String> {
     }
 }
 
+pub fn detect_thermal_printers() -> Vec<String> {
+    let ports = get_available_ports();
+    let mut detected = Vec::new();
+
+    for port_name in &ports {
+        if detect_printer_on_port(port_name) {
+            detected.push(port_name.clone());
+        }
+    }
+
+    detected
+}
+
+fn detect_printer_on_port(port_name: &str) -> bool {
+    // Try to open the port and send an ESC/POS initialize command
+    // If the port opens successfully and doesn't error, assume a printer might be connected
+    match serialport::new(port_name, 9600)
+        .timeout(Duration::from_millis(500))
+        .open()
+    {
+        Ok(mut port) => {
+            // Send ESC @ (initialize printer) - basic ESC/POS command
+            let init_cmd: [u8; 2] = [0x1B, 0x40];
+            if port.write_all(&init_cmd).is_ok() {
+                // Successfully sent command, likely a printer
+                log::info!("Detected potential printer on port: {}", port_name);
+                true
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
 fn get_local_ip() -> String {
     use std::net::UdpSocket;
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
