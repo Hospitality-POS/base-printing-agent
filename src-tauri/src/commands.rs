@@ -111,6 +111,11 @@ pub fn detect_thermal_printers() -> Vec<printer::PortInfo> {
 }
 
 #[tauri::command]
+pub fn list_windows_printers() -> Vec<String> {
+    printer::list_windows_printers()
+}
+
+#[tauri::command]
 pub async fn discover_network_printers() -> Vec<String> {
     printer::discover_network_printers().await
 }
@@ -129,7 +134,6 @@ pub async fn fetch_shops(company_code: String) -> Result<String, String> {
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
 
     let client = reqwest::Client::new();
-
     let url = format!("{}/api/shops", api_base);
 
     let resp = client
@@ -203,7 +207,6 @@ pub async fn fetch_connected_agents(
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
 
     let client = reqwest::Client::new();
-
     let url = format!("{}/api/agents/connected?shop_id={}", api_base, shop_id);
 
     let resp = client
@@ -243,10 +246,8 @@ pub async fn auto_add_connected_agent(
 ) -> Result<(), String> {
     let mut cfg = config::load_config(&app_handle).unwrap_or_default();
 
-    // Check if agent already exists in local config and update it if it does
     let agent_exists = cfg.agents.iter().any(|a| a.agent_id == agent_id);
     if agent_exists {
-        // Update existing agent with shop_id and zone if they're missing
         for agent in &mut cfg.agents {
             if agent.agent_id == agent_id {
                 let needs_update = agent.branch_id.is_empty() || (agent.zone.is_empty() && !zone.is_empty());
@@ -259,7 +260,6 @@ pub async fn auto_add_connected_agent(
                 }
                 log::info!("Updated existing agent: {} with branch_id: {}, zone: {}", device_name, shop_id, zone);
 
-                // Sync to API if fields were updated
                 if needs_update {
                     sync_agent_to_api(&app_handle, agent, &company_code).await?;
                 }
@@ -269,7 +269,6 @@ pub async fn auto_add_connected_agent(
         return Ok(());
     }
 
-    // Fetch agent details from API to get printer configuration
     let api_base = std::env::var("PRINT_AGENT_API_URL")
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
     let client = reqwest::Client::new();
@@ -291,20 +290,10 @@ pub async fn auto_add_connected_agent(
                     agent_details.printer_host,
                     agent_details.printer_network_port,
                 ),
-                Err(_) => (
-                    String::new(),
-                    "serial".to_string(),
-                    None,
-                    None,
-                ),
+                Err(_) => (String::new(), "serial".to_string(), None, None),
             }
         }
-        _ => (
-            String::new(),
-            "serial".to_string(),
-            None,
-            None,
-        ),
+        _ => (String::new(), "serial".to_string(), None, None),
     };
 
     let new_agent = config::AgentConfig {
@@ -326,7 +315,6 @@ pub async fn auto_add_connected_agent(
     config::add_agent(&app_handle, new_agent.clone())?;
     log::info!("Auto-added connected agent: {} ({}) with branch_id: {}", device_name, agent_id, shop_id);
 
-    // Don't start WebSocket loop here - agent doesn't have credentials yet
     Ok(())
 }
 
@@ -339,7 +327,6 @@ async fn sync_agent_to_api(
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
 
     let client = reqwest::Client::new();
-
     let url = format!("{}/api/agents/{}/update", api_base, agent.agent_id);
 
     let mut payload = serde_json::json!({
@@ -391,10 +378,10 @@ pub async fn connect_to_existing_agent(
     let new_agent = config::AgentConfig {
         agent_id: agent_id.clone(),
         company_code: company_code.clone(),
-        company_id: String::new(), // Will be fetched from API
+        company_id: String::new(),
         branch_id: String::new(),
-        zone: String::new(), // Will be fetched from API
-        device_name: String::new(), // Will be fetched from API
+        zone: String::new(),
+        device_name: String::new(),
         device_token: String::new(),
         printer_port: printer_port.clone(),
         paper_width: 80,
@@ -405,10 +392,7 @@ pub async fn connect_to_existing_agent(
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;
-
-    // Sync printer configuration to API
     sync_agent_to_api(&app_handle, &new_agent, &company_code).await?;
-
     start_ws_loop(state.inner().clone(), &cfg).await;
     Ok(())
 }
@@ -492,7 +476,6 @@ pub async fn update_agent_printer_port(
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
 
     let client = reqwest::Client::new();
-
     let url = format!("{}/api/agents/{}/update", api_base, agent_id);
 
     let mut payload = serde_json::json!({
@@ -522,7 +505,6 @@ pub async fn update_agent_printer_port(
         return Err(format!("Update agent failed ({}): {}", status, text));
     }
 
-    // Update local config
     let mut cfg = config::load_config(&app_handle).unwrap_or_default();
     if let Some(agent) = cfg.agents.iter_mut().find(|a| a.agent_id == agent_id) {
         agent.printer_port = printer_port.clone();
@@ -530,8 +512,10 @@ pub async fn update_agent_printer_port(
         agent.printer_host = printer_host.clone();
         agent.printer_network_port = printer_network_port;
         config::save_config(&app_handle, &cfg)?;
-        log::info!("Updated local config for agent: {} - printer_type: {}, printer_port: {}, printer_host: {:?}, printer_network_port: {:?}",
-            agent_id, printer_type, printer_port, printer_host, printer_network_port);
+        log::info!(
+            "Updated local config for agent: {} - printer_type: {}, printer_port: {}, printer_host: {:?}, printer_network_port: {:?}",
+            agent_id, printer_type, printer_port, printer_host, printer_network_port
+        );
     }
 
     Ok(())
@@ -557,16 +541,13 @@ pub async fn get_agent_status(
             .map(|c| c.connected)
             .unwrap_or(false);
 
-        // Queue count is now tracked by the API, local tracking removed
-        let queue_count = 0;
-
         statuses.push(AgentStatus {
             agent_id: agent.agent_id.clone(),
             ws_connected,
             zone: agent.zone.clone(),
             branch_id: agent.branch_id.clone(),
             device_name: agent.device_name.clone(),
-            queue_count,
+            queue_count: 0,
         });
     }
 
@@ -591,13 +572,11 @@ pub async fn pair_device(
 
     let client = reqwest::Client::new();
 
-    // Check if we already have an agent for this zone locally
     let cfg = config::load_config(&app_handle).unwrap_or_default();
     let existing_agent = cfg.agents.iter().find(|a| a.zone == zone && a.branch_id == branch_id);
 
     if let Some(agent) = existing_agent {
         log::info!("Found existing local agent for zone {}, updating printer configuration", zone);
-        // Update the existing agent's configuration with new printer settings
         let updated_agent = config::AgentConfig {
             agent_id: agent.agent_id.clone(),
             company_id: agent.company_id.clone(),
@@ -614,14 +593,11 @@ pub async fn pair_device(
             printer_network_port,
         };
 
-        // Update the config by removing the old agent and adding the updated one
         config::remove_agent(&app_handle, &agent.agent_id)?;
         config::add_agent(&app_handle, updated_agent)?;
 
-        log::info!("Agent printer configuration updated, restarting WebSocket loop for all agents...");
         let new_cfg = config::load_config(&app_handle).unwrap_or_default();
         start_ws_loop(state.inner().clone(), &new_cfg).await;
-
         return Ok(());
     }
 
@@ -649,18 +625,14 @@ pub async fn pair_device(
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
         log::info!("Pairing error response body: {}", text);
-        
-        // Handle 409 Conflict - agent already paired for this zone
+
         if status.as_u16() == 409 {
             log::info!("Agent already paired for zone {}, checking local config...", zone);
             let cfg = config::load_config(&app_handle).unwrap_or_default();
-            
-            // Check if we have an agent for this zone locally
             let existing_agent = cfg.agents.iter().find(|a| a.zone == zone && a.branch_id == branch_id);
-            
+
             if let Some(agent) = existing_agent {
                 log::info!("Found existing agent for zone {}, reinitializing connection", zone);
-                // Update the existing agent's configuration with new printer settings
                 let updated_agent = config::AgentConfig {
                     agent_id: agent.agent_id.clone(),
                     company_id: agent.company_id.clone(),
@@ -676,32 +648,25 @@ pub async fn pair_device(
                     printer_host,
                     printer_network_port,
                 };
-                
-                // Update the config by removing the old agent and adding the updated one
+
                 config::remove_agent(&app_handle, &agent.agent_id)?;
                 config::add_agent(&app_handle, updated_agent)?;
-                
-                log::info!("Agent updated, restarting WebSocket loop for all agents...");
+
                 let new_cfg = config::load_config(&app_handle).unwrap_or_default();
                 start_ws_loop(state.inner().clone(), &new_cfg).await;
-                
                 return Ok(());
             } else {
-                // No local agent for this zone, but API says one exists
-                // Try to unpair the existing agent from the server
                 log::info!("No local agent found, attempting to list and unpair existing agent from server...");
-                
                 let list_resp = list_agents(company_code.clone(), branch_id.clone(), Some(zone.clone())).await;
-                
+
                 match list_resp {
                     Ok(agents_json) => {
                         let agents: Vec<ServerAgent> = serde_json::from_str(&agents_json)
                             .map_err(|e| format!("Failed to parse agents JSON: {}", e))?;
-                        
+
                         if let Some(existing_agent) = agents.first() {
                             log::info!("Found existing agent on server: {}, attempting to unpair", existing_agent.agent_id);
-                            
-                            // Call unpair endpoint
+
                             let unpair_url = format!("{}/api/agents/{}/unpair", api_base, existing_agent.agent_id);
                             let unpair_resp = client
                                 .post(&unpair_url)
@@ -709,11 +674,10 @@ pub async fn pair_device(
                                 .timeout(std::time::Duration::from_secs(15))
                                 .send()
                                 .await;
-                            
+
                             match unpair_resp {
                                 Ok(resp) if resp.status().is_success() => {
                                     log::info!("Successfully unpaired existing agent from server, retrying pair...");
-                                    // Retry the pairing request
                                     let retry_resp = client
                                         .post(format!("{}/api/agents/pair", api_base))
                                         .json(&body)
@@ -721,18 +685,18 @@ pub async fn pair_device(
                                         .send()
                                         .await
                                         .map_err(|e| format!("Retry pairing request failed: {}", e))?;
-                                    
+
                                     if !retry_resp.status().is_success() {
                                         let status = retry_resp.status();
                                         let text = retry_resp.text().await.unwrap_or_default();
                                         return Err(format!("Retry pairing failed ({}): {}", status, text));
                                     }
-                                    
+
                                     let pair_resp: PairResponse = retry_resp
                                         .json()
                                         .await
                                         .map_err(|e| format!("Failed to parse retry pairing response: {}", e))?;
-                                    
+
                                     let new_agent = config::AgentConfig {
                                         agent_id: pair_resp.agent_id,
                                         company_id: pair_resp.company_id,
@@ -748,24 +712,19 @@ pub async fn pair_device(
                                         printer_host,
                                         printer_network_port,
                                     };
-                                    
+
                                     config::add_agent(&app_handle, new_agent)?;
-                                    
-                                    log::info!("Agent added after unpair, starting WebSocket loop for all agents...");
                                     let cfg = config::load_config(&app_handle).unwrap_or_default();
                                     start_ws_loop(state.inner().clone(), &cfg).await;
-                                    
                                     return Ok(());
                                 }
                                 Ok(resp) => {
                                     let status = resp.status();
                                     let text = resp.text().await.unwrap_or_default();
-                                    log::error!("Failed to unpair existing agent: {} - {}", status, text);
-                                    return Err(format!("Failed to unpair existing agent from server ({}): {}. Please remove it manually from the server admin panel.", status, text));
+                                    return Err(format!("Failed to unpair existing agent from server ({}): {}. Please remove it manually.", status, text));
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to unpair existing agent: {}", e);
-                                    return Err(format!("Failed to unpair existing agent from server: {}. Please remove it manually from the server admin panel.", e));
+                                    return Err(format!("Failed to unpair existing agent from server: {}. Please remove it manually.", e));
                                 }
                             }
                         } else {
@@ -773,13 +732,12 @@ pub async fn pair_device(
                         }
                     }
                     Err(e) => {
-                        log::error!("Failed to list agents: {}", e);
-                        return Err(format!("Failed to list agents from server: {}. Please remove the existing agent manually from the server admin panel. Original error: {}", e, text));
+                        return Err(format!("Failed to list agents from server: {}. Original error: {}", e, text));
                     }
                 }
             }
         }
-        
+
         log::error!("Pairing failed - Status: {}, Response: {}", status, text);
         return Err(format!("Pairing failed. HTTP Status: {}. API Response: {}", status, text));
     }
@@ -807,12 +765,10 @@ pub async fn pair_device(
 
     config::add_agent(&app_handle, new_agent.clone())?;
 
-    log::info!("Agent added, syncing printer configuration to server...");
     if let Err(e) = sync_agent_to_api(&app_handle, &new_agent, &company_code).await {
         log::error!("Failed to sync printer configuration to server: {}", e);
     }
 
-    log::info!("Agent added, starting WebSocket loop for all agents...");
     let cfg = config::load_config(&app_handle).unwrap_or_default();
     start_ws_loop(state.inner().clone(), &cfg).await;
 
@@ -841,17 +797,17 @@ pub async fn test_print(
         let printer_port = printer_port.unwrap_or_default();
         let printer_host = printer_host.unwrap_or_default();
         let printer_network_port = printer_network_port.unwrap_or(9100);
-        
-        if printer_type == "network" {
-            printer::PrintTarget::Network {
+
+        match printer_type.as_str() {
+            "network" => printer::PrintTarget::Network {
                 host: printer_host,
                 port: printer_network_port as u16,
-            }
-        } else {
-            printer::PrintTarget::Serial(printer_port)
+            },
+            "windows" => printer::PrintTarget::WindowsPrinter(printer_port),
+            _ => printer::PrintTarget::Serial(printer_port),
         }
     };
-    
+
     printer::test_print(&target)
 }
 
@@ -862,7 +818,7 @@ pub async fn unpair_device(
     agent_id: String,
 ) -> Result<(), String> {
     log::info!("Unpairing agent: {}", agent_id);
-    
+
     config::remove_agent(&app_handle, &agent_id)?;
 
     let mut connections = state.agent_connections.lock().await;
@@ -902,12 +858,10 @@ pub async fn unpair_all_agents(
         }
     }
 
-    // Clear WebSocket connections
     let mut connections = state.agent_connections.lock().await;
     connections.clear();
     drop(connections);
 
-    // Delete config file
     config::delete_config(&app_handle)?;
 
     log::info!("All agents unpaired successfully");
@@ -925,23 +879,15 @@ pub async fn test_printer_connection(
     let address_str = format!("{}:{}", printer_host, printer_network_port);
     log::info!("Testing printer connection to {}", address_str);
 
-    // Parse the address string to SocketAddr
     let socket_addr: SocketAddr = match address_str.parse() {
         Ok(addr) => addr,
-        Err(_e) => {
-            // Try to resolve as hostname
-            match (printer_host.as_str(), printer_network_port).to_socket_addrs() {
-                Ok(mut addrs) => {
-                    match addrs.next() {
-                        Some(addr) => addr,
-                        None => return Err(format!("No addresses found for {}", printer_host)),
-                    }
-                }
-                Err(e) => {
-                    return Err(format!("Failed to resolve address: {}", e));
-                }
-            }
-        }
+        Err(_e) => match (printer_host.as_str(), printer_network_port).to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(addr) => addr,
+                None => return Err(format!("No addresses found for {}", printer_host)),
+            },
+            Err(e) => return Err(format!("Failed to resolve address: {}", e)),
+        },
     };
 
     match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5)) {
@@ -1002,21 +948,19 @@ pub async fn fetch_agents_from_api(shop_id: String, company_code: String) -> Res
 }
 
 #[tauri::command]
-pub async fn remove_duplicate_agents(app_handle: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+pub async fn remove_duplicate_agents(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, String> {
     let mut cfg = config::load_config(&app_handle).unwrap_or_default();
 
     log::info!("Current agent count: {}", cfg.agents.len());
-    for (i, agent) in cfg.agents.iter().enumerate() {
-        log::info!("Agent {}: {} (zone: {})", i, agent.agent_id, agent.zone);
-    }
 
-    // Track seen agent IDs to identify duplicates
     let mut seen_ids = std::collections::HashSet::new();
     let mut duplicates_to_remove = Vec::new();
 
     for (index, agent) in cfg.agents.iter().enumerate() {
         if seen_ids.contains(&agent.agent_id) {
-            log::info!("Found duplicate at index {}: {}", index, agent.agent_id);
             duplicates_to_remove.push(index);
         } else {
             seen_ids.insert(agent.agent_id.clone());
@@ -1026,16 +970,12 @@ pub async fn remove_duplicate_agents(app_handle: tauri::AppHandle, state: State<
     let count = duplicates_to_remove.len();
     log::info!("Found {} duplicates to remove", count);
 
-    // Remove duplicates in reverse order to maintain indices
     for index in duplicates_to_remove.into_iter().rev() {
-        let removed_agent = cfg.agents.remove(index);
-        log::info!("Removed duplicate agent at index {}: {:?}", index, removed_agent.device_name);
+        let removed = cfg.agents.remove(index);
+        log::info!("Removed duplicate agent: {:?}", removed.device_name);
     }
 
     config::save_config(&app_handle, &cfg)?;
-    log::info!("Saved config with {} agents", cfg.agents.len());
-
-    // Restart WebSocket loop with cleaned config
     start_ws_loop(state.inner().clone(), &cfg).await;
 
     Ok(count)

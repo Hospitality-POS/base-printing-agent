@@ -13,17 +13,18 @@ const LF: u8 = 0x0A;
 pub enum PrintTarget {
     Serial(String),
     Network { host: String, port: u16 },
+    WindowsPrinter(String),
 }
 
 impl PrintTarget {
     pub fn from_agent_config(agent: &crate::config::AgentConfig) -> Self {
-        if agent.printer_type == "network" {
-            PrintTarget::Network {
+        match agent.printer_type.as_str() {
+            "network" => PrintTarget::Network {
                 host: agent.printer_host.clone().unwrap_or_default(),
                 port: agent.printer_network_port.unwrap_or(9100) as u16,
-            }
-        } else {
-            PrintTarget::Serial(agent.printer_port.clone())
+            },
+            "windows" => PrintTarget::WindowsPrinter(agent.printer_port.clone()),
+            _ => PrintTarget::Serial(agent.printer_port.clone()),
         }
     }
 
@@ -31,6 +32,7 @@ impl PrintTarget {
         match self {
             PrintTarget::Serial(p) => p.clone(),
             PrintTarget::Network { host, port } => format!("{}:{}", host, port),
+            PrintTarget::WindowsPrinter(name) => format!("WinPrinter:{}", name),
         }
     }
 }
@@ -100,6 +102,35 @@ pub fn detect_thermal_printers() -> Vec<PortInfo> {
             port_type,
         }
     }).collect()
+}
+
+pub fn list_windows_printers() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-Printer | Select-Object -ExpandProperty Name",
+            ])
+            .output();
+
+        match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                text.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            }
+            Err(_) => vec![],
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![]
+    }
 }
 
 fn get_local_ip() -> String {
@@ -184,6 +215,7 @@ fn write_bytes(target: &PrintTarget, bytes: &[u8]) -> Result<(), String> {
     match target {
         PrintTarget::Serial(port_name) => write_to_serial(port_name, bytes),
         PrintTarget::Network { host, port } => write_to_network(host, *port, bytes),
+        PrintTarget::WindowsPrinter(name) => write_to_windows_printer(name, bytes),
     }
 }
 
@@ -196,15 +228,57 @@ fn write_to_serial(port_name: &str, bytes: &[u8]) -> Result<(), String> {
 
 fn write_to_network(host: &str, port: u16, bytes: &[u8]) -> Result<(), String> {
     use std::net::TcpStream;
-    use std::io::Write;
-    
+
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect(&addr)
         .map_err(|e| format!("Failed to connect to network printer: {}", e))?;
-    
+
     stream.write_all(bytes)
         .map_err(|e| format!("Failed to write to network printer: {}", e))?;
     Ok(())
+}
+
+fn write_to_windows_printer(printer_name: &str, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::fs;
+        use std::process::Command;
+
+        // Write ESC/POS bytes to a temp file
+        let temp_path = std::env::temp_dir().join("print_agent_job.bin");
+        fs::write(&temp_path, bytes)
+            .map_err(|e| format!("Failed to write temp print file: {}", e))?;
+
+        // Use COPY /B to send raw bytes to the Windows printer
+        let cmd = format!(
+            "copy /b \"{}\" \"\\\\\\\\?\\\\{}\"",
+            temp_path.display(),
+            printer_name
+        );
+
+        let output = Command::new("cmd")
+            .args(["/C", &cmd])
+            .output()
+            .map_err(|e| format!("Failed to run print command: {}", e))?;
+
+        // Clean up temp file
+        let _ = fs::remove_file(&temp_path);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "Windows print command failed. stdout: {} stderr: {}",
+                stdout, stderr
+            ));
+        }
+
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Windows printer not supported on this platform".to_string())
+    }
 }
 
 pub fn format_receipt(job: &PrintJob) -> Vec<u8> {

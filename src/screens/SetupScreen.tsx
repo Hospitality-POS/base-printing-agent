@@ -5,7 +5,7 @@ interface Props {
   onPaired: (branchId: string) => void;
 }
 
-type PrinterType = "serial" | "network";
+type PrinterType = "serial" | "network" | "windows";
 
 interface Shop {
   _id: string;
@@ -67,6 +67,8 @@ export default function SetupScreen({ onPaired }: Props) {
   const [networkPrinters, setNetworkPrinters] = useState<string[]>([]);
   const [scanning, setScanning] = useState(false);
   const [availablePorts, setAvailablePorts] = useState<PortInfo[]>([]);
+  const [windowsPrinters, setWindowsPrinters] = useState<string[]>([]);
+  const [loadingWindowsPrinters, setLoadingWindowsPrinters] = useState(false);
   const [loading, setLoading] = useState(false);
   const [testPrinting, setTestPrinting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +108,25 @@ export default function SetupScreen({ onPaired }: Props) {
     }
   };
 
+  const loadWindowsPrinters = async () => {
+    setLoadingWindowsPrinters(true);
+    try {
+      const printers = await invoke<string[]>("list_windows_printers");
+      setWindowsPrinters(printers);
+      if (printers.length > 0 && !printerPort) {
+        setPrinterPort(printers[0]);
+      }
+      if (printers.length === 0) {
+        setError("No Windows printers found. Make sure your printer driver is installed.");
+      }
+    } catch (e) {
+      setWindowsPrinters([]);
+      setError(e instanceof Error ? e.message : "Failed to load Windows printers");
+    } finally {
+      setLoadingWindowsPrinters(false);
+    }
+  };
+
   const fetchShops = async (code: string) => {
     if (!code.trim()) {
       setShops([]);
@@ -138,14 +159,10 @@ export default function SetupScreen({ onPaired }: Props) {
     setConnectedAgentsLoading(true);
     setError(null);
     try {
-      console.log("Fetching connected agents with:", { code, shopId });
       const agentsJson = await invoke<string>("fetch_connected_agents", { companyCode: code, shopId });
-      console.log("Connected agents response:", agentsJson);
       const agentsData = JSON.parse(agentsJson) as ConnectedAgentsResponse;
-      console.log("Parsed agents:", agentsData);
       setConnectedAgents(agentsData.agents);
     } catch (e) {
-      console.error("Error fetching connected agents:", e);
       setConnectedAgents([]);
       setError(e instanceof Error ? e.message : "Failed to fetch connected agents" + JSON.stringify(e));
     } finally {
@@ -154,7 +171,6 @@ export default function SetupScreen({ onPaired }: Props) {
   };
 
   const handleViewAgents = async () => {
-    // Add all agents to local config// Auto-add all agents from the branch
     for (const agent of connectedAgents) {
       try {
         await invoke("auto_add_connected_agent", {
@@ -165,12 +181,10 @@ export default function SetupScreen({ onPaired }: Props) {
           zone: agent.zone,
           deviceName: agent.device_name,
         });
-        console.log(`Auto-added agent: ${agent.device_name} with shop_id: ${agent.shop_id}`);
       } catch (e) {
         console.error(`Failed to auto-add agent ${agent.device_name}:`, e);
       }
     }
-    // Trigger navigation to StatusScreen by calling onPaired
     onPaired(branchId);
   };
 
@@ -179,9 +193,7 @@ export default function SetupScreen({ onPaired }: Props) {
     setNetworkPrinters([]);
     setError(null);
     try {
-      console.log("Calling discover_network_printers...");
       const found = await invoke<string[]>("discover_network_printers");
-      console.log("Scan result:", found);
       setNetworkPrinters(found);
       if (found.length > 0 && !printerHost) {
         const first = found[0].split(" ")[0];
@@ -189,7 +201,6 @@ export default function SetupScreen({ onPaired }: Props) {
       }
       if (found.length === 0) setError("No printers found on port 9100. Enter the IP manually.");
     } catch (e) {
-      console.error("Network scan error:", e);
       setError("Network scan failed: " + String(e));
     } finally {
       setScanning(false);
@@ -200,7 +211,6 @@ export default function SetupScreen({ onPaired }: Props) {
     loadPorts();
   }, []);
 
-  // Fetch shops when company code changes (debounced)
   useEffect(() => {
     const timer = setTimeout(() => {
       fetchShops(companyCode);
@@ -208,7 +218,6 @@ export default function SetupScreen({ onPaired }: Props) {
     return () => clearTimeout(timer);
   }, [companyCode]);
 
-  // Fetch connected agents when branch changes
   useEffect(() => {
     if (branchId && companyCode.trim()) {
       fetchConnectedAgents(companyCode.trim(), branchId);
@@ -217,15 +226,18 @@ export default function SetupScreen({ onPaired }: Props) {
     }
   }, [branchId]);
 
-  const printerReady = printerType === "network"
-    ? printerHost.trim().length > 0
-    : printerPort.length > 0;
+  const printerReady =
+    printerType === "network"
+      ? printerHost.trim().length > 0
+      : printerPort.length > 0;
 
   const handleTestPrint = async () => {
     if (!printerReady) {
-      setError(printerType === "network"
-        ? "Enter a printer IP address first."
-        : "Please select a printer port first.");
+      setError(
+        printerType === "network"
+          ? "Enter a printer IP address first."
+          : "Please select a printer port first."
+      );
       return;
     }
     setTestPrinting(true);
@@ -234,7 +246,7 @@ export default function SetupScreen({ onPaired }: Props) {
     try {
       await invoke("test_print", {
         printerType,
-        printerPort: printerType === "serial" ? printerPort : null,
+        printerPort: printerType !== "network" ? printerPort : null,
         printerHost: printerType === "network" ? printerHost.trim() : null,
         printerNetworkPort: printerType === "network" ? parseInt(printerNetworkPort) || 9100 : null,
       });
@@ -252,9 +264,7 @@ export default function SetupScreen({ onPaired }: Props) {
       return;
     }
     if (!printerReady) {
-      setError(printerType === "network"
-        ? "Enter a printer IP address."
-        : "Select a printer port.");
+      setError(printerType === "network" ? "Enter a printer IP address." : "Select a printer port.");
       return;
     }
     setLoading(true);
@@ -266,7 +276,7 @@ export default function SetupScreen({ onPaired }: Props) {
         branchId: branchId.trim(),
         zone: zone.trim(),
         deviceName: deviceName.trim(),
-        printerPort: printerType === "serial" ? printerPort : "",
+        printerPort: printerType !== "network" ? printerPort : "",
         printerType,
         printerHost: printerType === "network" ? printerHost.trim() : null,
         printerNetworkPort: printerType === "network" ? parseInt(printerNetworkPort) || 9100 : null,
@@ -286,9 +296,7 @@ export default function SetupScreen({ onPaired }: Props) {
       return;
     }
     if (!printerReady) {
-      setError(printerType === "network"
-        ? "Enter a printer IP address."
-        : "Select a printer port.");
+      setError(printerType === "network" ? "Enter a printer IP address." : "Select a printer port.");
       return;
     }
     setLoading(true);
@@ -298,7 +306,7 @@ export default function SetupScreen({ onPaired }: Props) {
       await invoke("connect_to_existing_agent", {
         companyCode: companyCode.trim(),
         agentId: selectedAgent.agent_id,
-        printerPort: printerType === "serial" ? printerPort : "",
+        printerPort: printerType !== "network" ? printerPort : "",
         printerType,
         printerHost: printerType === "network" ? printerHost.trim() : null,
         printerNetworkPort: printerType === "network" ? parseInt(printerNetworkPort) || 9100 : null,
@@ -311,6 +319,343 @@ export default function SetupScreen({ onPaired }: Props) {
       setLoading(false);
     }
   };
+
+  // Reusable printer type toggle — used in both existing agent and add new forms
+  const PrinterTypeToggle = () => (
+    <Field label="Printer Connection" required>
+      <div className="flex rounded-lg border border-gray-700 overflow-hidden">
+        {(["serial", "network", "windows"] as PrinterType[]).map((t) => (
+          <button
+            key={t}
+            onClick={() => {
+              setPrinterType(t);
+              setPrinterPort("");
+              if (t === "windows") loadWindowsPrinters();
+            }}
+            className={`flex-1 py-2 text-sm font-medium transition-colors ${
+              printerType === t
+                ? "bg-green-600 text-white"
+                : "bg-gray-800 text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            {t === "serial" ? "USB / Serial" : t === "network" ? "Network (TCP/IP)" : "Windows Printer"}
+          </button>
+        ))}
+      </div>
+    </Field>
+  );
+
+  // Reusable serial port section
+  const SerialPortSection = () => (
+    <Field label="Printer Port" required>
+      <div className="flex gap-2">
+        <select
+          value={printerPort}
+          onChange={(e) => setPrinterPort(e.target.value)}
+          className="input-field flex-1"
+        >
+          {portsLoading ? (
+            <option value="">Loading ports...</option>
+          ) : availablePorts.length === 0 ? (
+            <option value="">No ports found — type manually below</option>
+          ) : (
+            availablePorts.map((p) => (
+              <option key={p.name} value={p.name}>{p.name}</option>
+            ))
+          )}
+        </select>
+        <button
+          onClick={loadPorts}
+          disabled={portsLoading}
+          className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm transition-colors disabled:opacity-50"
+          title="Refresh ports"
+        >
+          <svg className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
+        <button
+          onClick={detectPrinters}
+          disabled={detectingPrinters}
+          className="px-3 py-2 bg-blue-600 hover:bg-blue-700 border border-blue-500 rounded-lg text-white text-sm transition-colors disabled:opacity-50"
+          title="Detect thermal printers"
+        >
+          {detectingPrinters ? (
+            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+            </svg>
+          )}
+        </button>
+      </div>
+      <input
+        type="text"
+        value={printerPort}
+        onChange={(e) => setPrinterPort(e.target.value)}
+        placeholder="Or type manually, e.g. COM3 or /dev/usb/lp0"
+        className="input-field mt-2"
+      />
+      {availablePorts.length > 0 && (
+        <div className="mt-3">
+          <label className="block text-xs text-gray-400 mb-2">Detected Printers</label>
+
+          {availablePorts.filter(p => p.port_type.type_name === 'USB').length > 0 && (
+            <div className="mb-3">
+              <label className="block text-xs text-blue-400 mb-1">USB Ports</label>
+              <div className="space-y-1">
+                {availablePorts.filter(p => p.port_type.type_name === 'USB').map((port) => (
+                  <div key={port.name} className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPrinterPort(port.name)}
+                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                        printerPort === port.name
+                          ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                      }`}
+                    >
+                      <div className="font-medium">{port.name}</div>
+                      {port.port_type.manufacturer && (
+                        <div className="text-xs text-gray-500">
+                          {port.port_type.manufacturer} - {port.port_type.product || ''}
+                        </div>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await invoke("test_print", { printerType: "serial", printerPort: port.name });
+                          setSuccess(`Test print sent to ${port.name}`);
+                        } catch (e: unknown) {
+                          setError(e instanceof Error ? e.message : String(e));
+                        }
+                      }}
+                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                    >
+                      Test
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {availablePorts.filter(p => p.port_type.type_name === 'COM/Serial').length > 0 && (
+            <div>
+              <label className="block text-xs text-green-400 mb-1">COM / Serial Ports</label>
+              <div className="space-y-1">
+                {availablePorts.filter(p => p.port_type.type_name === 'COM/Serial').map((port) => (
+                  <div key={port.name} className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPrinterPort(port.name)}
+                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                        printerPort === port.name
+                          ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                      }`}
+                    >
+                      {port.name}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await invoke("test_print", { printerType: "serial", printerPort: port.name });
+                          setSuccess(`Test print sent to ${port.name}`);
+                        } catch (e: unknown) {
+                          setError(e instanceof Error ? e.message : String(e));
+                        }
+                      }}
+                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                    >
+                      Test
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Field>
+  );
+
+  // Reusable network section
+  const NetworkSection = () => (
+    <div className="space-y-3">
+      <button
+        type="button"
+        onClick={scanNetworkPrinters}
+        disabled={scanning}
+        className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+      >
+        {scanning ? (
+          <>
+            <div className="w-4 h-4 border border-green-400 border-t-transparent rounded-full animate-spin" />
+            Scanning network for printers...
+          </>
+        ) : (
+          <>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
+            </svg>
+            Scan Network for Printers
+          </>
+        )}
+      </button>
+
+      {networkPrinters.length > 0 && (
+        <Field label="Discovered Printers" required>
+          <div className="space-y-1.5">
+            {networkPrinters.map((entry) => {
+              const ip = entry.split(" ")[0];
+              const selected = printerHost === ip;
+              return (
+                <button
+                  key={ip}
+                  type="button"
+                  onClick={() => setPrinterHost(ip)}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-sm transition-colors ${
+                    selected
+                      ? "bg-green-500/10 border-green-500/40 text-green-400"
+                      : "bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
+                    </svg>
+                    <span className="font-mono">{ip}</span>
+                  </div>
+                  <span className="text-xs text-gray-500">port 9100</span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+      )}
+
+      <Field label={networkPrinters.length > 0 ? "Or Enter IP Manually" : "Printer IP Address"} required={networkPrinters.length === 0}>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={printerHost}
+            onChange={(e) => setPrinterHost(e.target.value)}
+            placeholder="e.g. 192.168.1.100"
+            className="input-field flex-1"
+          />
+          <input
+            type="number"
+            value={printerNetworkPort}
+            onChange={(e) => setPrinterNetworkPort(e.target.value)}
+            placeholder="9100"
+            min={1}
+            max={65535}
+            className="input-field w-24"
+            title="TCP port (default 9100)"
+          />
+        </div>
+        <p className="text-xs text-gray-600 mt-1">IP : Port — default port 9100 (Epson, Star, Bixolon)</p>
+      </Field>
+    </div>
+  );
+
+  // Reusable Windows printer section
+  const WindowsPrinterSection = () => (
+    <Field label="Windows Printer" required>
+      <button
+        type="button"
+        onClick={loadWindowsPrinters}
+        disabled={loadingWindowsPrinters}
+        className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2 mb-2"
+      >
+        {loadingWindowsPrinters ? (
+          <>
+            <div className="w-4 h-4 border border-green-400 border-t-transparent rounded-full animate-spin" />
+            Loading printers...
+          </>
+        ) : (
+          <>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Refresh Windows Printers
+          </>
+        )}
+      </button>
+
+      {windowsPrinters.length > 0 ? (
+        <div className="space-y-1">
+          {windowsPrinters.map((name) => (
+            <div key={name} className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPrinterPort(name)}
+                className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                  printerPort === name
+                    ? "bg-green-600/20 border-green-500 text-green-400"
+                    : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                }`}
+              >
+                {name}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await invoke("test_print", { printerType: "windows", printerPort: name });
+                    setSuccess(`Test print sent to ${name}`);
+                  } catch (e: unknown) {
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+              >
+                Test
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-gray-500 text-center py-3">
+          Click "Refresh" to load installed Windows printers
+        </p>
+      )}
+    </Field>
+  );
+
+  const PrinterSection = () => {
+    if (printerType === "serial") return <SerialPortSection />;
+    if (printerType === "network") return <NetworkSection />;
+    return <WindowsPrinterSection />;
+  };
+
+  const TestPrintButton = () => (
+    <button
+      onClick={handleTestPrint}
+      disabled={!printerReady || testPrinting}
+      className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+    >
+      {testPrinting ? (
+        <>
+          <div className="w-4 h-4 border border-gray-400 border-t-transparent rounded-full animate-spin" />
+          Printing...
+        </>
+      ) : (
+        <>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+          </svg>
+          Test Print
+        </>
+      )}
+    </button>
+  );
 
   return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
@@ -331,11 +676,7 @@ export default function SetupScreen({ onPaired }: Props) {
               type="text"
               value={companyCode}
               onChange={(e) => setCompanyCode(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.ctrlKey && e.key === 'p') {
-                  e.preventDefault();
-                }
-              }}
+              onKeyDown={(e) => { if (e.ctrlKey && e.key === 'p') e.preventDefault(); }}
               placeholder="e.g. ACME-2024"
               className="input-field"
               autoComplete="off"
@@ -354,10 +695,7 @@ export default function SetupScreen({ onPaired }: Props) {
             ) : shops.length > 0 ? (
               <select
                 value={branchId}
-                onChange={(e) => {
-                  setBranchId(e.target.value);
-                  setSelectedAgent(null);
-                }}
+                onChange={(e) => { setBranchId(e.target.value); setSelectedAgent(null); }}
                 className="input-field"
               >
                 {shops.map((shop) => (
@@ -367,17 +705,13 @@ export default function SetupScreen({ onPaired }: Props) {
                 ))}
               </select>
             ) : companyCode.trim() ? (
-              <div className="input-field text-gray-500 text-sm">
-                No shops found for this company code
-              </div>
+              <div className="input-field text-gray-500 text-sm">No shops found for this company code</div>
             ) : (
-              <div className="input-field text-gray-600 text-sm">
-                Enter company code above to load shops
-              </div>
+              <div className="input-field text-gray-600 text-sm">Enter company code above to load shops</div>
             )}
           </Field>
 
-          {/* Show existing agents if available and not in add new mode */}
+          {/* Existing agents loading */}
           {!showAddNew && connectedAgentsLoading && (
             <div className="flex items-center justify-center py-8">
               <div className="w-6 h-6 border-2 border-green-500 border-t-transparent rounded-full animate-spin mr-2" />
@@ -385,6 +719,7 @@ export default function SetupScreen({ onPaired }: Props) {
             </div>
           )}
 
+          {/* Existing agents list */}
           {!showAddNew && !connectedAgentsLoading && connectedAgents.length > 0 && (
             <>
               <div className="border-t border-gray-800 pt-4">
@@ -392,10 +727,7 @@ export default function SetupScreen({ onPaired }: Props) {
                   <h3 className="text-sm font-medium text-white">
                     Found {connectedAgents.length} Existing Agent{connectedAgents.length > 1 ? 's' : ''}
                   </h3>
-                  <button
-                    onClick={() => setShowAddNew(true)}
-                    className="text-xs text-green-400 hover:text-green-300"
-                  >
+                  <button onClick={() => setShowAddNew(true)} className="text-xs text-green-400 hover:text-green-300">
                     + Add New Agent
                   </button>
                 </div>
@@ -415,9 +747,7 @@ export default function SetupScreen({ onPaired }: Props) {
                         <span className="font-medium">{agent.device_name}</span>
                         <span className="text-gray-500">({agent.zone})</span>
                       </div>
-                      {agent.connected && (
-                        <span className="text-xs text-green-400">Connected</span>
-                      )}
+                      {agent.connected && <span className="text-xs text-green-400">Connected</span>}
                     </button>
                   ))}
                 </div>
@@ -440,13 +770,8 @@ export default function SetupScreen({ onPaired }: Props) {
               {showAgentsList && connectedAgents.length > 0 && (
                 <div className="border-t border-gray-800 pt-4">
                   <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-gray-300">
-                      Print Agents for this Branch
-                    </h3>
-                    <button
-                      onClick={() => setShowAgentsList(false)}
-                      className="text-sm text-gray-400 hover:text-gray-300"
-                    >
+                    <h3 className="text-sm font-semibold text-gray-300">Print Agents for this Branch</h3>
+                    <button onClick={() => setShowAgentsList(false)} className="text-sm text-gray-400 hover:text-gray-300">
                       ← Back
                     </button>
                   </div>
@@ -465,16 +790,14 @@ export default function SetupScreen({ onPaired }: Props) {
                           <div className="font-medium">{agent.device_name}</div>
                           <span className="text-sm text-gray-500">({agent.zone})</span>
                         </div>
-                        {agent.connected && (
-                          <span className="text-xs text-green-400">Connected</span>
-                        )}
+                        {agent.connected && <span className="text-xs text-green-400">Connected</span>}
                       </button>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Show printer config for selected agent only if not already connected */}
+              {/* Printer config for selected disconnected agent */}
               {selectedAgent && !selectedAgent.connected && (
                 <div className="border-t border-gray-800 pt-4 space-y-4">
                   <div className="flex items-center gap-2 text-sm text-gray-400">
@@ -484,268 +807,9 @@ export default function SetupScreen({ onPaired }: Props) {
                     <span>Configure printer for <strong className="text-white">{selectedAgent.device_name}</strong></span>
                   </div>
 
-                  {/* Printer Connection Type Toggle */}
-                  <Field label="Printer Connection" required>
-                    <div className="flex rounded-lg border border-gray-700 overflow-hidden">
-                      {(["serial", "network"] as PrinterType[]).map((t) => (
-                        <button
-                          key={t}
-                          onClick={() => setPrinterType(t)}
-                          className={`flex-1 py-2 text-sm font-medium transition-colors ${
-                            printerType === t
-                              ? "bg-green-600 text-white"
-                              : "bg-gray-800 text-gray-400 hover:text-gray-200"
-                          }`}
-                        >
-                          {t === "serial" ? "USB / Serial" : "Network (TCP/IP)"}
-                        </button>
-                      ))}
-                    </div>
-                  </Field>
-
-                  {printerType === "serial" ? (
-                    <Field label="Printer Port" required>
-                      <div className="flex gap-2">
-                        <select
-                          value={printerPort}
-                          onChange={(e) => setPrinterPort(e.target.value)}
-                          className="input-field flex-1"
-                        >
-                          {portsLoading ? (
-                            <option value="">Loading ports...</option>
-                          ) : availablePorts.length === 0 ? (
-                            <option value="">No ports found — type manually below</option>
-                          ) : (
-                            availablePorts.map((p) => (
-                              <option key={p.name} value={p.name}>{p.name}</option>
-                            ))
-                          )}
-                        </select>
-                        <button
-                          onClick={loadPorts}
-                          disabled={portsLoading}
-                          className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm transition-colors disabled:opacity-50"
-                          title="Refresh ports"
-                        >
-                          <svg className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                          </svg>
-                        </button>
-                        <button
-                          onClick={detectPrinters}
-                          disabled={detectingPrinters}
-                          className="px-3 py-2 bg-blue-600 hover:bg-blue-700 border border-blue-500 rounded-lg text-white text-sm transition-colors disabled:opacity-50"
-                          title="Detect thermal printers"
-                        >
-                          {detectingPrinters ? (
-                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                            </svg>
-                          ) : (
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-                            </svg>
-                          )}
-                        </button>
-                      </div>
-                      <input
-                        type="text"
-                        value={printerPort}
-                        onChange={(e) => setPrinterPort(e.target.value)}
-                        placeholder="Or type manually, e.g. COM3 or /dev/usb/lp0"
-                        className="input-field mt-2"
-                      />
-                      {availablePorts.length > 0 && (
-                        <div className="mt-3">
-                          <label className="block text-xs text-gray-400 mb-2">Detected Printers</label>
-                          
-                          {/* USB Ports */}
-                          {availablePorts.filter(p => p.port_type.type_name === 'USB').length > 0 && (
-                            <div className="mb-3">
-                              <label className="block text-xs text-blue-400 mb-1">USB Ports</label>
-                              <div className="space-y-1">
-                                {availablePorts.filter(p => p.port_type.type_name === 'USB').map((port) => (
-                                  <div key={port.name} className="flex gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => setPrinterPort(port.name)}
-                                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
-                                        printerPort === port.name
-                                          ? "bg-blue-600/20 border-blue-500 text-blue-400"
-                                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
-                                      }`}
-                                    >
-                                      <div className="font-medium">{port.name}</div>
-                                      {port.port_type.manufacturer && (
-                                        <div className="text-xs text-gray-500">
-                                          {port.port_type.manufacturer} - {port.port_type.product || ''}
-                                        </div>
-                                      )}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        try {
-                                          await invoke("test_print", { 
-                                            printerType: "serial",
-                                            printerPort: port.name
-                                          });
-                                          setSuccess(`Test print sent to ${port.name}`);
-                                        } catch (e: unknown) {
-                                          setError(e instanceof Error ? e.message : String(e));
-                                        }
-                                      }}
-                                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
-                                    >
-                                      Test
-                                    </button>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* COM/Serial Ports */}
-                          {availablePorts.filter(p => p.port_type.type_name === 'COM/Serial').length > 0 && (
-                            <div>
-                              <label className="block text-xs text-green-400 mb-1">COM / Serial Ports</label>
-                              <div className="space-y-1">
-                                {availablePorts.filter(p => p.port_type.type_name === 'COM/Serial').map((port) => (
-                                  <div key={port.name} className="flex gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => setPrinterPort(port.name)}
-                                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
-                                        printerPort === port.name
-                                          ? "bg-blue-600/20 border-blue-500 text-blue-400"
-                                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
-                                      }`}
-                                    >
-                                      {port.name}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        try {
-                                          await invoke("test_print", { 
-                                            printerType: "serial",
-                                            printerPort: port.name
-                                          });
-                                          setSuccess(`Test print sent to ${port.name}`);
-                                        } catch (e: unknown) {
-                                          setError(e instanceof Error ? e.message : String(e));
-                                        }
-                                      }}
-                                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
-                                    >
-                                      Test
-                                    </button>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </Field>
-                  ) : (
-                    <div className="space-y-3">
-                      <button
-                        type="button"
-                        onClick={scanNetworkPrinters}
-                        disabled={scanning}
-                        className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-                      >
-                        {scanning ? (
-                          <>
-                            <div className="w-4 h-4 border border-green-400 border-t-transparent rounded-full animate-spin" />
-                            Scanning network for printers...
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
-                            </svg>
-                            Scan Network for Printers
-                          </>
-                        )}
-                      </button>
-
-                      {networkPrinters.length > 0 && (
-                        <Field label="Discovered Printers" required>
-                          <div className="space-y-1.5">
-                            {networkPrinters.map((entry) => {
-                              const ip = entry.split(" ")[0];
-                              const selected = printerHost === ip;
-                              return (
-                                <button
-                                  key={ip}
-                                  type="button"
-                                  onClick={() => setPrinterHost(ip)}
-                                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-sm transition-colors ${
-                                    selected
-                                      ? "bg-green-500/10 border-green-500/40 text-green-400"
-                                      : "bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600"
-                                  }`}
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
-                                    </svg>
-                                    <span className="font-mono">{ip}</span>
-                                  </div>
-                                  <span className="text-xs text-gray-500">port 9100</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </Field>
-                      )}
-
-                      <Field label={networkPrinters.length > 0 ? "Or Enter IP Manually" : "Printer IP Address"} required={networkPrinters.length === 0}>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={printerHost}
-                            onChange={(e) => setPrinterHost(e.target.value)}
-                            placeholder="e.g. 192.168.1.100"
-                            className="input-field flex-1"
-                          />
-                          <input
-                            type="number"
-                            value={printerNetworkPort}
-                            onChange={(e) => setPrinterNetworkPort(e.target.value)}
-                            placeholder="9100"
-                            min={1}
-                            max={65535}
-                            className="input-field w-24"
-                            title="TCP port (default 9100)"
-                          />
-                        </div>
-                        <p className="text-xs text-gray-600 mt-1">IP : Port — default port 9100 (Epson, Star, Bixolon)</p>
-                      </Field>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={handleTestPrint}
-                    disabled={!printerReady || testPrinting}
-                    className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
-                  >
-                    {testPrinting ? (
-                      <>
-                        <div className="w-4 h-4 border border-gray-400 border-t-transparent rounded-full animate-spin" />
-                        Printing...
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
-                        </svg>
-                        Test Print
-                      </>
-                    )}
-                  </button>
+                  <PrinterTypeToggle />
+                  <PrinterSection />
+                  <TestPrintButton />
 
                   <button
                     onClick={handleConnectToExisting}
@@ -757,14 +821,12 @@ export default function SetupScreen({ onPaired }: Props) {
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                         Connecting...
                       </>
-                    ) : (
-                      "Connect to Agent"
-                    )}
+                    ) : "Connect to Agent"}
                   </button>
                 </div>
               )}
 
-              {/* Show message for already connected agents */}
+              {/* Already connected agent message */}
               {selectedAgent && selectedAgent.connected && (
                 <div className="border-t border-gray-800 pt-4">
                   <div className="flex items-center gap-2 text-sm text-green-400">
@@ -778,7 +840,7 @@ export default function SetupScreen({ onPaired }: Props) {
             </>
           )}
 
-          {/* Show add new agent button if no agents or in add new mode */}
+          {/* No agents — show Add New button */}
           {!showAddNew && !connectedAgentsLoading && connectedAgents.length === 0 && branchId && (
             <div className="border-t border-gray-800 pt-4">
               <p className="text-sm text-gray-400 mb-3">No existing agents found for this branch</p>
@@ -791,17 +853,12 @@ export default function SetupScreen({ onPaired }: Props) {
             </div>
           )}
 
-          {/* Show add new agent form only when explicitly in add new mode */}
+          {/* Add new agent form */}
           {showAddNew && (
             <div className="border-t border-gray-800 pt-4 space-y-4">
-              <div className="flex items-center gap-2 text-sm text-gray-400">
-                <button
-                  onClick={() => setShowAddNew(false)}
-                  className="text-green-400 hover:text-green-300"
-                >
-                  ← Back
-                </button>
-              </div>
+              <button onClick={() => setShowAddNew(false)} className="text-green-400 hover:text-green-300 text-sm">
+                ← Back
+              </button>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Zone" required>
@@ -824,176 +881,9 @@ export default function SetupScreen({ onPaired }: Props) {
                 </Field>
               </div>
 
-              {/* Printer Connection Type Toggle */}
-              <Field label="Printer Connection" required>
-                <div className="flex rounded-lg border border-gray-700 overflow-hidden">
-                  {(["serial", "network"] as PrinterType[]).map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => setPrinterType(t)}
-                      className={`flex-1 py-2 text-sm font-medium transition-colors ${
-                        printerType === t
-                          ? "bg-green-600 text-white"
-                          : "bg-gray-800 text-gray-400 hover:text-gray-200"
-                      }`}
-                    >
-                      {t === "serial" ? "USB / Serial" : "Network (TCP/IP)"}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-
-              {printerType === "serial" ? (
-                <Field label="Printer Port" required>
-                  <div className="flex gap-2">
-                    <select
-                      value={printerPort}
-                      onChange={(e) => setPrinterPort(e.target.value)}
-                      className="input-field flex-1"
-                    >
-                      {portsLoading ? (
-                        <option value="">Loading ports...</option>
-                      ) : availablePorts.length === 0 ? (
-                        <option value="">No ports found — type manually below</option>
-                      ) : (
-                        availablePorts.map((p) => (
-                          <option key={p.name} value={p.name}>{p.name}</option>
-                        ))
-                      )}
-                    </select>
-                    <button
-                      onClick={loadPorts}
-                      disabled={portsLoading}
-                      className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm transition-colors disabled:opacity-50"
-                      title="Refresh ports"
-                    >
-                      <svg className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={detectPrinters}
-                      disabled={detectingPrinters}
-                      className="px-3 py-2 bg-blue-600 hover:bg-blue-700 border border-blue-500 rounded-lg text-white text-sm transition-colors disabled:opacity-50"
-                      title="Detect thermal printers"
-                    >
-                      {detectingPrinters ? (
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                      ) : (
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-                        </svg>
-                      )}
-                    </button>
-                  </div>
-                  <input
-                    type="text"
-                    value={printerPort}
-                    onChange={(e) => setPrinterPort(e.target.value)}
-                    placeholder="Or type manually, e.g. COM3 or /dev/usb/lp0"
-                    className="input-field mt-2"
-                  />
-                </Field>
-              ) : (
-                <div className="space-y-3">
-                  <button
-                    type="button"
-                    onClick={scanNetworkPrinters}
-                    disabled={scanning}
-                    className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    {scanning ? (
-                      <>
-                        <div className="w-4 h-4 border border-green-400 border-t-transparent rounded-full animate-spin" />
-                        Scanning network for printers...
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
-                        </svg>
-                        Scan Network for Printers
-                      </>
-                    )}
-                  </button>
-
-                  {networkPrinters.length > 0 && (
-                    <Field label="Discovered Printers" required>
-                      <div className="space-y-1.5">
-                        {networkPrinters.map((entry) => {
-                          const ip = entry.split(" ")[0];
-                          const selected = printerHost === ip;
-                          return (
-                            <button
-                              key={ip}
-                              type="button"
-                              onClick={() => setPrinterHost(ip)}
-                              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-sm transition-colors ${
-                                selected
-                                  ? "bg-green-500/10 border-green-500/40 text-green-400"
-                                  : "bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
-                                </svg>
-                                <span className="font-mono">{ip}</span>
-                              </div>
-                              <span className="text-xs text-gray-500">port 9100</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </Field>
-                  )}
-
-                  <Field label={networkPrinters.length > 0 ? "Or Enter IP Manually" : "Printer IP Address"} required={networkPrinters.length === 0}>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={printerHost}
-                        onChange={(e) => setPrinterHost(e.target.value)}
-                        placeholder="e.g. 192.168.1.100"
-                        className="input-field flex-1"
-                      />
-                      <input
-                        type="number"
-                        value={printerNetworkPort}
-                        onChange={(e) => setPrinterNetworkPort(e.target.value)}
-                        placeholder="9100"
-                        min={1}
-                        max={65535}
-                        className="input-field w-24"
-                        title="TCP port (default 9100)"
-                      />
-                    </div>
-                    <p className="text-xs text-gray-600 mt-1">IP : Port — default port 9100 (Epson, Star, Bixolon)</p>
-                  </Field>
-                </div>
-              )}
-
-              <button
-                onClick={handleTestPrint}
-                disabled={!printerReady || testPrinting}
-                className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
-              >
-                {testPrinting ? (
-                  <>
-                    <div className="w-4 h-4 border border-gray-400 border-t-transparent rounded-full animate-spin" />
-                    Printing...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
-                    </svg>
-                    Test Print
-                  </>
-                )}
-              </button>
+              <PrinterTypeToggle />
+              <PrinterSection />
+              <TestPrintButton />
 
               <button
                 onClick={handlePair}
@@ -1005,9 +895,7 @@ export default function SetupScreen({ onPaired }: Props) {
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                     Pairing...
                   </>
-                ) : (
-                  "Pair Device"
-                )}
+                ) : "Pair Device"}
               </button>
             </div>
           )}

@@ -1,4 +1,4 @@
-name: Build Installers (Windows + macOS)
+name: Build Installers (Windows)
 
 on:
   push:
@@ -41,7 +41,7 @@ jobs:
               repo: context.repo.repo,
               tag_name: tag,
               name: `PrintAgent ${tag}`,
-              body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| macOS Apple Silicon | \`PrintAgent_*.aarch64.dmg\` |\n| macOS Intel | \`PrintAgent_*.x64.dmg\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, Branch ID, Zone and select your printer\n3. Click **Pair Device**`,
+              body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, Branch ID, Zone and select your printer\n3. Click **Pair Device**`,
               draft: true,
               prerelease: false,
             });
@@ -81,6 +81,7 @@ jobs:
 
   build-macos-arm:
     needs: create-release
+    if: false
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +145,7 @@ jobs:
 
   # ── Step 3: publish the draft once all builds are attached ─────────────────
   publish-release:
-    needs: [create-release, build-windows, build-macos-arm]
+    needs: [create-release, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release
@@ -167,7 +168,7 @@ jobs:
                   repo: context.repo.repo,
                   tag_name: tag,
                   name: `PrintAgent ${tag}`,
-                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| macOS Apple Silicon | \`PrintAgent_*.aarch64.dmg\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select shop from dropdown, enter Zone and select your printer\n3. Click **Pair Device**`,
+                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select shop from dropdown, enter Zone and select your printer\n3. Click **Pair Device**`,
                   draft: false,
                   prerelease: false,
                 });

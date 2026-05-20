@@ -59,6 +59,7 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
                     continue;
                 }
             }
+            "windows" => printer::PrintTarget::WindowsPrinter(agent.printer_port.clone()),
             _ => printer::PrintTarget::Serial(agent.printer_port.clone()),
         };
 
@@ -76,22 +77,29 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
                 printer_target.clone(),
             ));
         } else {
-            log::info!("Agent {} missing WebSocket credentials, skipping WebSocket connection", agent.agent_id);
+            log::info!(
+                "Agent {} missing WebSocket credentials, skipping WebSocket connection",
+                agent.agent_id
+            );
         }
 
         // Start polling loop for pull-based job fetching
         if !agent.branch_id.is_empty() && !agent.zone.is_empty() {
-            // Check if printer configuration is valid
             let has_valid_printer = match agent.printer_type.as_str() {
                 "network" => {
                     agent.printer_host.as_ref().map_or(false, |h| !h.is_empty())
                         && agent.printer_network_port.is_some()
                 }
+                "windows" => !agent.printer_port.is_empty(),
                 _ => !agent.printer_port.is_empty(),
             };
 
             if has_valid_printer {
-                log::info!("Starting polling loop for agent: {} (zone: {})", agent.agent_id, agent.zone);
+                log::info!(
+                    "Starting polling loop for agent: {} (zone: {})",
+                    agent.agent_id,
+                    agent.zone
+                );
                 tokio::spawn(ws_client::start_polling_loop(
                     Arc::clone(&state),
                     agent.branch_id.clone(),
@@ -100,7 +108,10 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
                     agent.agent_id.clone(),
                 ));
             } else {
-                log::warn!("Agent {} has invalid printer configuration, skipping polling", agent.agent_id);
+                log::warn!(
+                    "Agent {} has invalid printer configuration, skipping polling",
+                    agent.agent_id
+                );
             }
         }
     }
@@ -133,6 +144,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_available_ports,
             commands::detect_thermal_printers,
+            commands::list_windows_printers,
             commands::discover_network_printers,
             commands::fetch_shops,
             commands::list_agents,
@@ -177,9 +189,8 @@ fn setup_tray(app_handle: &tauri::AppHandle) {
 
     let quit = MenuItem::with_id(app_handle, "quit", "Quit PrintAgent", true, None::<&str>)
         .expect("Failed to create quit menu item");
-    let show =
-        MenuItem::with_id(app_handle, "show", "Open Status", true, None::<&str>)
-            .expect("Failed to create show menu item");
+    let show = MenuItem::with_id(app_handle, "show", "Open Status", true, None::<&str>)
+        .expect("Failed to create show menu item");
     let test_print_item =
         MenuItem::with_id(app_handle, "test_print", "Test Print", true, None::<&str>)
             .expect("Failed to create test_print menu item");
