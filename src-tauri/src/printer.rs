@@ -54,6 +54,29 @@ pub fn detect_thermal_printers() -> Vec<String> {
 }
 
 fn detect_printer_on_port(port_name: &str) -> bool {
+    // Get port info to check for known non-printer devices
+    let ports_info = serialport::available_ports();
+    let port_info = ports_info.iter().find(|p| p.port_name == port_name);
+    
+    // Filter out known non-printer devices (wifi dongles, etc.) by checking port type
+    if let Some(info) = port_info {
+        if let Some(usb_info) = &info.port_type {
+            if let serialport::SerialPortType::Usb(vid, pid, _, _) = usb_info {
+                // Known non-printer vendor IDs (add more as needed)
+                const NON_PRINTER_VIDS: &[u16] = &[
+                    0x0bda,  // Realtek (common wifi dongle)
+                    0x148f,  // MediaTek wifi
+                    0x0cf3,  // Qualcomm Atheros wifi
+                    0x0b95,  // ASIX Ethernet
+                ];
+                if NON_PRINTER_VIDS.contains(vid) {
+                    log::info!("Skipping non-printer device on port: {} (VID: 0x{:04x})", port_name, vid);
+                    return false;
+                }
+            }
+        }
+    }
+    
     // Try to open the port and send an ESC/POS initialize command
     // If the port opens successfully and doesn't error, assume a printer might be connected
     match serialport::new(port_name, 9600)

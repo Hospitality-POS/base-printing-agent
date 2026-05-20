@@ -35,6 +35,8 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
     printerHost?: string;
     printerNetworkPort?: number;
   }>>([]);
+  const [unpairConfirm, setUnpairConfirm] = useState<{ agentId: string | null }>({ agentId: null });
+  const [unpairAllConfirm, setUnpairAllConfirm] = useState(false);
 
   // Fetch agents from API on mount
   React.useEffect(() => {
@@ -176,12 +178,13 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
   };
 
   const handleUnpair = async (agentId: string) => {
-    alert(`Unpair button clicked for agent: ${agentId}`);
-    console.log("Unpair button clicked for agent:", agentId);
-    if (!confirm(`Remove agent ${agentId}?`)) {
-      console.log("User cancelled unpair");
-      return;
-    }
+    setUnpairConfirm({ agentId });
+  };
+
+  const confirmUnpair = async () => {
+    const agentId = unpairConfirm.agentId;
+    if (!agentId) return;
+    
     console.log("Calling unpair_device command");
     try {
       await invoke("unpair_device", { agentId });
@@ -200,20 +203,22 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
         printerHost: a.printer_host,
         printerNetworkPort: a.printer_network_port,
       })));
+      setUnpairConfirm({ agentId: null });
     } catch (e: unknown) {
       console.error("Failed to unpair:", e);
-      alert("Failed to remove agent: " + (e instanceof Error ? e.message : String(e)));
     }
   };
 
   const handleUnpairAll = async () => {
-    if (!confirm("Remove all agents? This will clear all local configurations.")) {
-      return;
-    }
+    setUnpairAllConfirm(true);
+  };
+
+  const confirmUnpairAll = async () => {
     try {
       const result = await invoke<string>("unpair_all_agents");
       alert(result);
-      onShowSetup();
+      setAgents([]);
+      setUnpairAllConfirm(false);
     } catch (e: unknown) {
       console.error("Failed to unpair all agents:", e);
       alert("Failed to unpair all agents: " + (e instanceof Error ? e.message : String(e)));
@@ -477,6 +482,58 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
             </svg>
           )}
           {testResult.msg}
+        </div>
+      )}
+
+      {/* Unpair Confirmation Modal */}
+      {unpairConfirm.agentId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-sm w-full mx-4">
+            <h3 className="text-lg font-semibold text-white mb-2">Remove Agent</h3>
+            <p className="text-gray-400 text-sm mb-6">
+              Are you sure you want to remove agent {unpairConfirm.agentId}? This will disconnect the printer from this device.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setUnpairConfirm({ agentId: null })}
+                className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmUnpair}
+                className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm font-medium transition-colors"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unpair All Confirmation Modal */}
+      {unpairAllConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-sm w-full mx-4">
+            <h3 className="text-lg font-semibold text-white mb-2">Remove All Agents</h3>
+            <p className="text-gray-400 text-sm mb-6">
+              Are you sure you want to remove all agents? This will clear all local configurations and disconnect all printers.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setUnpairAllConfirm(false)}
+                className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmUnpairAll}
+                className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm font-medium transition-colors"
+              >
+                Remove All
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -84,8 +84,7 @@ export default function SetupScreen({ onPaired }: Props) {
       const detected = await invoke<string[]>("detect_thermal_printers");
       setAvailablePorts(detected);
       if (detected.length > 0) {
-        setPrinterPort(detected[0]);
-        setSuccess(`Detected ${detected.length} thermal printer(s)`);
+        setSuccess(`Detected ${detected.length} thermal printer(s) - select one below`);
       } else {
         setError("No thermal printers detected on available ports");
       }
@@ -194,7 +193,7 @@ export default function SetupScreen({ onPaired }: Props) {
   useEffect(() => {
     const timer = setTimeout(() => {
       fetchShops(companyCode);
-    }, 500);
+    }, 1500);
     return () => clearTimeout(timer);
   }, [companyCode]);
 
@@ -321,8 +320,17 @@ export default function SetupScreen({ onPaired }: Props) {
               type="text"
               value={companyCode}
               onChange={(e) => setCompanyCode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.ctrlKey && e.key === 'p') {
+                  e.preventDefault();
+                }
+              }}
               placeholder="e.g. ACME-2024"
               className="input-field"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck="false"
             />
           </Field>
 
@@ -536,6 +544,27 @@ export default function SetupScreen({ onPaired }: Props) {
                         placeholder="Or type manually, e.g. COM3 or /dev/usb/lp0"
                         className="input-field mt-2"
                       />
+                      {availablePorts.length > 0 && (
+                        <div className="mt-3">
+                          <label className="block text-xs text-gray-400 mb-2">Detected Printers</label>
+                          <div className="space-y-1">
+                            {availablePorts.map((port) => (
+                              <button
+                                key={port}
+                                type="button"
+                                onClick={() => setPrinterPort(port)}
+                                className={`w-full px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                                  printerPort === port
+                                    ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                                    : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                                }`}
+                              >
+                                {port}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </Field>
                   ) : (
                     <div className="space-y-3">
