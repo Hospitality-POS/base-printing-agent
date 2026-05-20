@@ -625,6 +625,7 @@ pub async fn pair_device(
         "branchId": branch_id,
         "zone": zone,
         "deviceName": device_name,
+        "printerType": printer_type,
     });
 
     log::info!("Pairing request to API: {} with body: {}", format!("{}/api/agents/pair", api_base), body);
@@ -775,7 +776,7 @@ pub async fn pair_device(
         }
         
         log::error!("Pairing failed - Status: {}, Response: {}", status, text);
-        return Err(format!("Pairing failed with HTTP status {}. API Response: {}. This could mean: 1) Invalid company code, 2) Branch not found, 3) Zone already paired with another device, 4) Server error. Please check the logs for the full API request details.", status, text));
+        return Err(format!("Pairing failed. HTTP Status: {}. API Response: {}", status, text));
     }
 
     let pair_resp: PairResponse = resp
