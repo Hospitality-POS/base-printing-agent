@@ -42,9 +42,9 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
   React.useEffect(() => {
     const fetchAgents = async () => {
       try {
-        const shopIdToUse = shopId || config.agents[0]?.branchId || "67841c7f52c7b8888375503b";
+        const shopIdToUse = shopId || config.agents[0]?.branchId || "6a06e94aa2c6c63b9b080e00";
         console.log("Fetching agents from API with shopId:", shopIdToUse);
-        const fetchedAgents = await invoke<any[]>("fetch_agents_from_api", { shopId: shopIdToUse });
+        const fetchedAgents = await invoke<any[]>("fetch_agents_from_api", { shopId: shopIdToUse, companyCode: config.agents[0]?.companyCode || "BP-358003" });
         console.log("Fetched agents from API:", fetchedAgents.length);
         setAgents(fetchedAgents.map((a: any) => ({
           agentId: a.agent_id,

@@ -957,17 +957,18 @@ pub async fn test_printer_connection(
 }
 
 #[tauri::command]
-pub async fn fetch_agents_from_api(shop_id: String) -> Result<Vec<ServerAgent>, String> {
+pub async fn fetch_agents_from_api(shop_id: String, company_code: String) -> Result<Vec<ServerAgent>, String> {
     let api_base = std::env::var("PRINT_AGENT_API_URL")
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/list?shop_id={}", api_base, shop_id);
 
     log::info!("Fetching agents from API: {}", url);
+    log::info!("Using company code header: {}", company_code);
 
     let response = client
         .get(&url)
-        .header("companycode", "RPOS-000002")
+        .header("companycode", &company_code)
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await;
