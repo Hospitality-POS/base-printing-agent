@@ -41,33 +41,12 @@ pub fn get_available_ports() -> Vec<String> {
 }
 
 pub fn detect_thermal_printers() -> Vec<String> {
-    let ports_info = match serialport::available_ports() {
-        Ok(ports) => ports,
-        Err(_) => return vec![],
-    };
-    
+    let ports = get_available_ports();
     let mut detected = Vec::new();
-    
-    for port_info in &ports_info {
-        let port_name = &port_info.port_name;
-        
-        // Get additional info about the port
-        let description = if let Some(port_type) = &port_info.port_type {
-            match port_type {
-                serialport::SerialPortType::Usb(vid, pid, serial, product) => {
-                    format!("{} (USB: VID={:04x}, PID={:04x})", port_name, vid, pid)
-                }
-                serialport::SerialPortType::Pci => format!("{} (PCI)", port_name),
-                serialport::SerialPortType::Bluetooth => format!("{} (Bluetooth)", port_name),
-                serialport::SerialPortType::Unknown => format!("{} (Unknown)", port_name),
-            }
-        } else {
-            port_name.clone()
-        };
-        
-        // Try to detect if it's a printer
+
+    for port_name in &ports {
         if detect_printer_on_port(port_name) {
-            detected.push(description);
+            detected.push(port_name.clone());
         }
     }
 

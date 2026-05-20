@@ -549,18 +549,36 @@ export default function SetupScreen({ onPaired }: Props) {
                           <label className="block text-xs text-gray-400 mb-2">Detected Printers</label>
                           <div className="space-y-1">
                             {availablePorts.map((port) => (
-                              <button
-                                key={port}
-                                type="button"
-                                onClick={() => setPrinterPort(port)}
-                                className={`w-full px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
-                                  printerPort === port
-                                    ? "bg-blue-600/20 border-blue-500 text-blue-400"
-                                    : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
-                                }`}
-                              >
-                                {port}
-                              </button>
+                              <div key={port} className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setPrinterPort(port)}
+                                  className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
+                                    printerPort === port
+                                      ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                                      : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
+                                  }`}
+                                >
+                                  {port}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await invoke("test_print", { 
+                                        printerType: "serial",
+                                        printerPort: port
+                                      });
+                                      setSuccess(`Test print sent to ${port}`);
+                                    } catch (e: unknown) {
+                                      setError(e instanceof Error ? e.message : String(e));
+                                    }
+                                  }}
+                                  className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                                >
+                                  Test
+                                </button>
+                              </div>
                             ))}
                           </div>
                         </div>
