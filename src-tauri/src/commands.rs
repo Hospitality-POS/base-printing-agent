@@ -903,7 +903,7 @@ pub async fn unpair_all_agents(
     }
 
     // Clear WebSocket connections
-    let mut connections = state.connections.lock().await;
+    let mut connections = state.agent_connections.lock().await;
     connections.clear();
     drop(connections);
 
