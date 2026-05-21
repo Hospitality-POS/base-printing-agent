@@ -5,6 +5,9 @@ description = "Silent print routing agent for thermal printers"
 authors = ["PrintAgent"]
 edition = "2021"
 
+[package.metadata.windows]
+subsystem = "windows"
+
 [lib]
 name = "print_agent_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
