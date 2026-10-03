@@ -12,14 +12,14 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 pub async fn run_ws_loop(
     state: Arc<AppState>,
-    ws_url: String,
-    device_token: String,
-    agent_id: String,
-    zone: String,
-    branch_id: String,
-    company_code: String,
+    agent: crate::config::AgentConfig,
     printer_target: PrintTarget,
 ) {
+    let ws_url = agent.ws_url.clone();
+    let device_token = agent.device_token.clone();
+    let agent_id = agent.agent_id.clone();
+    let branch_id = agent.branch_id.clone();
+    let company_code = agent.company_code.clone();
     loop {
         log::info!("Connecting to WebSocket at {}", ws_url);
 
@@ -48,7 +48,8 @@ pub async fn run_ws_loop(
                     "type": "auth",
                     "deviceToken": device_token,
                     "agentId": agent_id,
-                    "zone": zone,
+                    "zone": agent.zone,
+                    "zones": agent.all_zones(),
                     "branchId": branch_id,
                     "companyCode": company_code,
                 })
@@ -130,10 +131,8 @@ pub async fn run_ws_loop(
                 let inbound_result = handle_inbound(
                     &mut read,
                     &printer_target,
-                    &agent_id,
-                    &zone,
+                    &agent,
                     Arc::clone(&state),
-                    &company_code,
                 )
                 .await;
 
@@ -159,10 +158,8 @@ pub async fn run_ws_loop(
 async fn handle_inbound<S>(
     read: &mut S,
     printer_target: &PrintTarget,
-    agent_id: &str,
-    zone: &str,
+    agent: &crate::config::AgentConfig,
     state: Arc<AppState>,
-    company_code: &str,
 ) -> Result<(), String>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -178,15 +175,13 @@ where
                 handle_message(
                     &text,
                     printer_target,
-                    agent_id,
-                    zone,
+                    agent,
                     Arc::clone(&state),
-                    company_code,
                 )
                 .await;
             }
             Ok(Message::Ping(_)) => {
-                send_via_state(&state, agent_id, r#"{"type":"pong"}"#.to_string()).await;
+                send_via_state(&state, &agent.agent_id, r#"{"type":"pong"}"#.to_string()).await;
             }
             Ok(Message::Close(_)) => {
                 return Err("Server closed connection.".to_string());
@@ -200,14 +195,66 @@ where
     Ok(())
 }
 
+/// Decide whether a job should be printed by this agent, based on its
+/// routing mode: "location" matches on the job's location/section, anything
+/// else (default "category") matches on zone + optional main_category_id.
+pub fn job_matches_agent(
+    routing_mode: Option<&str>,
+    agent_zones: &[String],
+    agent_main_category_ids: &[String],
+    agent_locations: &[String],
+    job_zone: &str,
+    job_main_category_id: Option<&str>,
+    job_location: Option<&str>,
+    job_location_name: Option<&str>,
+) -> bool {
+    match routing_mode {
+        Some("location") => {
+            // The agent may hold location ids in `locations` and names in
+            // `zones`; jobs may carry either the id or the name.
+            let agent_targets: Vec<&str> = agent_locations
+                .iter()
+                .chain(agent_zones.iter())
+                .map(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let candidates: Vec<&str> = [job_location, job_location_name]
+                .into_iter()
+                .flatten()
+                .filter(|c| !c.is_empty())
+                .collect();
+            if !agent_targets.is_empty() && !candidates.is_empty() {
+                // Anything ordered from one of this agent's locations prints
+                // here, regardless of the item's main category.
+                candidates.iter().any(|c| agent_targets.contains(c))
+            } else {
+                // Job carries no location — fall back to zone matching.
+                agent_zones.iter().any(|z| z == job_zone)
+            }
+        }
+        _ => {
+            if !agent_zones.iter().any(|z| z == job_zone) {
+                return false;
+            }
+            // When both sides know main category ids, require membership.
+            match job_main_category_id {
+                Some(j) if !j.is_empty() && !agent_main_category_ids.is_empty() => {
+                    agent_main_category_ids.iter().any(|a| a == j)
+                }
+                _ => true,
+            }
+        }
+    }
+}
+
 async fn handle_message(
     text: &str,
     printer_target: &PrintTarget,
-    agent_id: &str,
-    zone: &str,
+    agent: &crate::config::AgentConfig,
     state: Arc<AppState>,
-    company_code: &str,
 ) {
+    let agent_id = &agent.agent_id;
+    let company_code = &agent.company_code;
     let value: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -221,12 +268,23 @@ async fn handle_message(
             if let Some(job_val) = value.get("job") {
                 match serde_json::from_value::<PrintJob>(job_val.clone()) {
                     Ok(job) => {
-                        if job.destination_zone != zone {
+                        if !job_matches_agent(
+                            agent.routing_mode.as_deref(),
+                            &agent.all_zones(),
+                            &agent.all_main_category_ids(),
+                            &agent.all_locations(),
+                            &job.destination_zone,
+                            job.main_category_id.as_deref(),
+                            job.location_id.as_deref().or(job.location.as_deref()),
+                            job.location_name.as_deref(),
+                        ) {
                             log::info!(
-                                "Job {} is for zone '{}', we are '{}', skipping.",
+                                "Job {} (zone '{}', location {:?}) does not match this agent (zone '{}', location {:?}), skipping.",
                                 job.job_id,
                                 job.destination_zone,
-                                zone
+                                job.location,
+                                agent.zone,
+                                agent.location,
                             );
                             return;
                         }
@@ -327,7 +385,13 @@ async fn fetch_and_process_jobs(
     let client = reqwest::Client::new();
 
     let mut url = format!("{}/api/agents/pending-jobs?shop_id={}", api_base, shop_id);
-    if !zone.is_empty() {
+    // In location mode — or when the agent serves multiple zones — we poll
+    // the whole shop and filter client-side, since a single zone filter
+    // could exclude jobs this agent should print.
+    if agent.routing_mode.as_deref() != Some("location")
+        && agent.all_zones().len() <= 1
+        && !zone.is_empty()
+    {
         url.push_str(&format!("&zone={}", urlencoding::encode(zone)));
     }
 
@@ -369,6 +433,21 @@ async fn fetch_and_process_jobs(
         match serde_json::from_value::<PendingJob>(job_value.clone()) {
             Ok(pending_job) => {
                 let job_id = pending_job.job_id.clone();
+
+                if !job_matches_agent(
+                    agent.routing_mode.as_deref(),
+                    &agent.all_zones(),
+                    &agent.all_main_category_ids(),
+                    &agent.all_locations(),
+                    &pending_job.zone,
+                    Some(&pending_job.main_category_id),
+                    pending_job.location_id.as_deref().or(pending_job.location.as_deref()),
+                    pending_job.location_name.as_deref(),
+                ) {
+                    log::debug!("Job {} does not match this agent's routing, skipping", job_id);
+                    continue;
+                }
+
                 log::info!("Processing job: {}", job_id);
 
                 let print_job = PrintJob {
@@ -381,6 +460,11 @@ async fn fetch_and_process_jobs(
                     cut_paper:        pending_job.cut_paper,
                     priority:         pending_job.priority.clone(),
                     created_at:       pending_job.created_at.clone(),
+                    main_category_id: Some(pending_job.main_category_id.clone()),
+                    location:         pending_job.location.clone(),
+                    location_id:      pending_job.location_id.clone(),
+                    location_name:    pending_job.location_name.clone(),
+                    table_name:       pending_job.table_name.clone(),
                 };
 
                 job_handler::update_last_job(state, &print_job.job_id);

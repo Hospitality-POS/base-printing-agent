@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag (e.g. v0.2.0)"
+        description: "Release tag (e.g. v0.7.0)"
         required: true
-        default: "v0.1.0"
+        default: "v0.7.0"
 
 jobs:
   # ── Step 1: create the GitHub Release once ────────────────────────────────
@@ -41,13 +41,13 @@ jobs:
               repo: context.repo.repo,
               tag_name: tag,
               name: `PrintAgent ${tag}`,
-              body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, Branch ID, Zone and select your printer\n3. Click **Pair Device**`,
+              body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows 10/11 (desktop app) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows 10/11 (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| Windows 7/8/8.1+ 64-bit (browser + helper) | \`PrintAgentHelper-Setup-x64.exe\` |\n| Windows 7/8 32-bit (browser + helper) | \`PrintAgentHelper-Setup-x86.exe\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select branch, route by category or location, pick your printer\n3. Click **Pair Device**`,
               draft: true,
               prerelease: false,
             });
             return data.id;
 
-  # ── Step 2: build all three platforms in parallel ─────────────────────────
+  # ── Step 2a: modern desktop app (Windows 10/11, WebView2) ────────────────
   build-windows:
     needs: create-release
     runs-on: windows-latest
@@ -67,6 +67,15 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          TAG="${{ needs.create-release.outputs.tag }}"
+          VER="${TAG#v}"
+          echo "Syncing version to $VER"
+          npm version "$VER" --no-git-tag-version --allow-same-version
+          node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='$VER';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -79,10 +88,12 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target x86_64-pc-windows-msvc
 
-  build-macos-arm:
+  # ── Step 2b: legacy helper installers (Windows 7/8/8.1/10/11) ────────────
+  # Browser UI + native helper — no WebView2 required. Built for the
+  # dedicated Win7 targets so it runs on the oldest supported POS terminals.
+  build-legacy-helper:
     needs: create-release
-    if: false
-    runs-on: macos-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -91,9 +102,11 @@ jobs:
           node-version: 20
           cache: "npm"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Nightly + rust-src is required for `-Z build-std` on the win7 targets
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: aarch64-apple-darwin
+          components: rust-src
+          targets: x86_64-win7-windows-msvc, i686-win7-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -102,50 +115,43 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri app (macOS Apple Silicon)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://api.hospitality.reliatech.co.ke' }}
+      - name: Build web UI for helper
+        run: |
+          npm run build
+          Copy-Item -Recurse -Force dist installer/web
+
+      - name: Build helper (64-bit, Win7 target)
+        working-directory: src-tauri
+        run: cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release -p print-agent-helper
+
+      - name: Build helper (32-bit, Win7 target)
+        working-directory: src-tauri
+        run: cargo +nightly build -Z build-std=std,panic_abort --target i686-win7-windows-msvc --release -p print-agent-helper
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build legacy installers
+        working-directory: installer
+        run: |
+          Copy-Item ../src-tauri/target/x86_64-win7-windows-msvc/release/print-agent-helper.exe print-agent-helper-x64.exe
+          Copy-Item ../src-tauri/target/i686-win7-windows-msvc/release/print-agent-helper.exe print-agent-helper-x86.exe
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /DHELPER_EXE=print-agent-helper-x64.exe /DOUTFILE=PrintAgentHelper-Setup-x64.exe print-agent-helper.nsi
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /DHELPER_EXE=print-agent-helper-x86.exe /DOUTFILE=PrintAgentHelper-Setup-x86.exe print-agent-helper.nsi
+
+      - name: Upload legacy assets to release
+        uses: softprops/action-gh-release@v2
         with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target aarch64-apple-darwin
-
-  build-macos-intel:
-    needs: create-release
-    runs-on: macos-latest
-    if: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: "npm"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build Tauri app (macOS Intel)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRINT_AGENT_API_URL: ${{ secrets.PRINT_AGENT_API_URL || 'https://api.hospitality.reliatech.co.ke' }}
-        with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target x86_64-apple-darwin
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: |
+            installer/PrintAgentHelper-Setup-x64.exe
+            installer/PrintAgentHelper-Setup-x86.exe
+            installer/print-agent-helper-x64.exe
+            installer/print-agent-helper-x86.exe
 
   # ── Step 3: publish the draft once all builds are attached ─────────────────
   publish-release:
-    needs: [create-release, build-windows]
+    needs: [create-release, build-windows, build-legacy-helper]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release
@@ -168,7 +174,7 @@ jobs:
                   repo: context.repo.repo,
                   tag_name: tag,
                   name: `PrintAgent ${tag}`,
-                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows (installer) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select shop from dropdown, enter Zone and select your printer\n3. Click **Pair Device**`,
+                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows 10/11 (desktop app) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows 7/8/8.1+ (browser + helper) | \`PrintAgentHelper-Setup-x64.exe\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select branch, route by category or location, pick your printer\n3. Click **Pair Device**`,
                   draft: false,
                   prerelease: false,
                 });

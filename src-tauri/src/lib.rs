@@ -68,12 +68,7 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
             log::info!("Starting WebSocket loop for agent: {}", agent.agent_id);
             tokio::spawn(ws_client::run_ws_loop(
                 Arc::clone(&state),
-                agent.ws_url.clone(),
-                agent.device_token.clone(),
-                agent.agent_id.clone(),
-                agent.zone.clone(),
-                agent.branch_id.clone(),
-                agent.company_code.clone(),
+                agent.clone(),
                 printer_target.clone(),
             ));
         } else {
@@ -149,6 +144,8 @@ pub fn run() {
             commands::fetch_shops,
             commands::list_agents,
             commands::fetch_connected_agents,
+            commands::fetch_categories,
+            commands::fetch_locations,
             commands::fetch_agents_from_api,
             commands::auto_add_connected_agent,
             commands::connect_to_existing_agent,
@@ -162,6 +159,9 @@ pub fn run() {
             commands::unpair_all_agents,
             commands::test_printer_connection,
             commands::remove_duplicate_agents,
+            commands::get_os_version,
+            commands::get_autostart,
+            commands::set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("Error running PrintAgent");
@@ -233,7 +233,13 @@ fn setup_tray(app_handle: &tauri::AppHandle) {
                     let cfg = config::load_config(&app);
                     if let Some(ref c) = cfg {
                         if !c.agents.is_empty() {
-                            let target = printer::PrintTarget::from_agent_config(&c.agents[0]);
+                            let agent = &c.agents[0];
+                            let target = printer::PrintTarget::from_fields(
+                                &agent.printer_type,
+                                &agent.printer_port,
+                                agent.printer_host.as_deref(),
+                                agent.printer_network_port,
+                            );
                             if let Err(e) = printer::test_print(&target) {
                                 log::error!("Tray test print failed: {}", e);
                             }

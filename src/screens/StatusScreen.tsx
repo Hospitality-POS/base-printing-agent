@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/invoke";
 import { useAgentStatus } from "../hooks/useAgentStatus";
 
 interface Config {
@@ -59,6 +59,23 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
   });
   const [savingConfig, setSavingConfig] = useState(false);
   const [configResult, setConfigResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+
+  React.useEffect(() => {
+    invoke<boolean>("get_autostart")
+      .then(setAutostart)
+      .catch(() => setAutostart(null));
+  }, []);
+
+  const toggleAutostart = async (enabled: boolean) => {
+    setAutostart(enabled);
+    try {
+      await invoke("set_autostart", { enabled });
+    } catch (e) {
+      setAutostart(!enabled);
+      setConfigResult({ ok: false, msg: `Failed to update autostart: ${e}` });
+    }
+  };
 
   const mapAgent = (a: any): Agent => ({
     agentId: a.agent_id,
@@ -601,6 +618,30 @@ export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
           </div>
         </div>
       )}
+
+      {/* Run options */}
+      {autostart !== null && (
+        <div className="mt-4 bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center justify-between">
+          <div>
+            <p className="text-white text-sm font-medium">Run at Windows startup</p>
+            <p className="text-gray-500 text-xs">Start PrintAgent automatically when you sign in</p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={autostart}
+            onClick={() => toggleAutostart(!autostart)}
+            className={`relative w-11 h-6 rounded-full transition-colors ${autostart ? "bg-green-600" : "bg-gray-700"}`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${autostart ? "translate-x-5" : ""}`}
+            />
+          </button>
+        </div>
+      )}
+
+      <p className="text-center text-gray-600 text-xs mt-4">
+        A product of Basepoint Cloud Inc
+      </p>
     </div>
   );
 }

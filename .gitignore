@@ -11,3 +11,7 @@ src-tauri/gen/
 
 .DS_Store
 Thumbs.db
+
+# Installer build artifacts (built by CI release workflow)
+installer/*.exe
+installer/web/

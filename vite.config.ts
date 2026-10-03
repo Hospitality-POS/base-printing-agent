@@ -7,6 +7,13 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
+    proxy: {
+      "/agent-api": {
+        target: "https://api.hospitality.reliatech.co.ke",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/agent-api/, ""),
+      },
+    },
     watch: {
       ignored: ["**/src-tauri/**"],
     },

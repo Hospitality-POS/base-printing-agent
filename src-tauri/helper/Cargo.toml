@@ -1,0 +1,18 @@
+[package]
+name = "print-agent-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Headless print helper for the browser UI on legacy Windows (7/8/8.1) and any OS without WebView2"
+
+# Build for modern Windows:  cargo build --release -p print-agent-helper
+# Build for Windows 7:       rustup target add i686-pc-windows-msvc (or use the
+#                            x86_64-win7-windows-msvc target with nightly -Zbuild-std)
+
+[dependencies]
+printer-core = { path = "../printer-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+ureq = { version = "2", features = ["tls"] }
+log = "0.4"
+env_logger = "0.11"

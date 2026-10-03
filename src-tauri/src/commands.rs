@@ -6,30 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrintJobLine {
-    #[serde(rename = "type")]
-    pub line_type: String,
-    pub text: String,
-    pub qty: Option<u32>,
-    pub price: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrintJob {
-    #[serde(rename = "_id")]
-    pub id: Option<String>,
-    pub job_id: String,
-    pub branch_id: String,
-    pub destination_zone: String,
-    pub content_type: String,
-    pub lines: Vec<PrintJobLine>,
-    pub cut_paper: bool,
-    pub priority: String,
-    pub created_at: String,
-}
+pub use printer_core::{PrintJob, PrintJobLine};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,7 +94,65 @@ pub fn list_windows_printers() -> Vec<String> {
 
 #[tauri::command]
 pub async fn discover_network_printers() -> Vec<String> {
-    printer::discover_network_printers().await
+    tokio::task::spawn_blocking(printer::discover_network_printers)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn get_os_version() -> printer::OsInfo {
+    printer::get_os_info()
+}
+
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "PrintAgent";
+
+#[tauri::command]
+pub fn get_autostart() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return std::process::Command::new("reg")
+            .args(["query", RUN_KEY, "/v", RUN_VALUE])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        if enabled {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .map_err(|e| e.to_string())?;
+            let out = Command::new("reg")
+                .args([
+                    "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ",
+                    "/d", &format!("\"{}\"", exe), "/f",
+                ])
+                .output()
+                .map_err(|e| format!("Failed to run reg: {}", e))?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+        } else {
+            let _ = Command::new("reg")
+                .args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])
+                .output();
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Autostart is only supported on Windows".to_string())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,6 +192,105 @@ pub async fn fetch_shops(company_code: String) -> Result<String, String> {
 
     serde_json::to_string(&shops)
         .map_err(|e| format!("Failed to serialize shops: {}", e))
+}
+
+/// Fetch selectable options for job routing. Paths are configurable via env
+/// vars because the exact backend routes may differ per deployment:
+///   PRINT_AGENT_CATEGORIES_PATH (default: /api/main-categories)
+///   PRINT_AGENT_LOCATIONS_PATH  (default: /api/locations)
+async fn fetch_routing_options(path_env: &str, default_path: &str, shop_id: &str, company_code: &str) -> Result<String, String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let path = std::env::var(path_env).unwrap_or_else(|_| default_path.to_string());
+    let sep = if path.contains('?') { "&" } else { "?" };
+    let url = format!("{}{}{}{}", api_base, path, sep, format!("shop_id={}", urlencoding::encode(shop_id)));
+
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("companycode", company_code)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Request to {} failed: {}", url, e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Fetch failed ({}): {}", status, text));
+    }
+
+    resp.text().await.map_err(|e| format!("Failed to read body: {}", e))
+}
+
+/// Fallback when no dedicated list endpoint exists: derive distinct option
+/// values from pending print jobs for the shop.
+async fn derive_options_from_jobs(shop_id: &str, company_code: &str, field: &str) -> Result<String, String> {
+    let api_base = std::env::var("PRINT_AGENT_API_URL")
+        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let url = format!("{}/api/agents/pending-jobs?shop_id={}", api_base, urlencoding::encode(shop_id));
+
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("companycode", company_code)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Pending jobs request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Pending jobs failed ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse pending jobs: {}", e))?;
+    let jobs = body["jobs"].as_array().cloned().unwrap_or_default();
+
+    let mut seen = std::collections::BTreeSet::new();
+    for job in &jobs {
+        if let Some(v) = job[field].as_str() {
+            if !v.is_empty() {
+                seen.insert(v.to_string());
+            }
+        }
+    }
+
+    let options: Vec<serde_json::Value> = seen
+        .into_iter()
+        .map(|v| serde_json::json!({ "_id": v, "name": v }))
+        .collect();
+    serde_json::to_string(&options).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn fetch_categories(shop_id: String, company_code: String) -> Result<String, String> {
+    match fetch_routing_options(
+        "PRINT_AGENT_CATEGORIES_PATH",
+        "/categories/main-categories",
+        &shop_id,
+        &company_code,
+    )
+    .await
+    {
+        Ok(s) => Ok(s),
+        Err(_) => derive_options_from_jobs(&shop_id, &company_code, "zone").await,
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_locations(shop_id: String, company_code: String) -> Result<String, String> {
+    match fetch_routing_options(
+        "PRINT_AGENT_LOCATIONS_PATH",
+        "/tables/location/locations",
+        &shop_id,
+        &company_code,
+    )
+    .await
+    {
+        Ok(s) => Ok(s),
+        Err(_) => derive_options_from_jobs(&shop_id, &company_code, "location").await,
+    }
 }
 
 #[tauri::command]
@@ -310,6 +444,12 @@ pub async fn auto_add_connected_agent(
         printer_type,
         printer_host,
         printer_network_port,
+        routing_mode: None,
+        main_category_id: None,
+        location: None,
+        zones: Vec::new(),
+        main_category_ids: Vec::new(),
+        locations: Vec::new(),
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;
@@ -389,6 +529,12 @@ pub async fn connect_to_existing_agent(
         printer_type: printer_type.clone(),
         printer_host: printer_host.clone(),
         printer_network_port,
+        routing_mode: None,
+        main_category_id: None,
+        location: None,
+        zones: Vec::new(),
+        main_category_ids: Vec::new(),
+        locations: Vec::new(),
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;
@@ -409,6 +555,14 @@ pub struct PendingJob {
     pub zone: String,
     #[serde(rename = "main_category_id")]
     pub main_category_id: String,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub location_id: Option<String>,
+    #[serde(default)]
+    pub location_name: Option<String>,
+    #[serde(default)]
+    pub table_name: Option<String>,
     #[serde(rename = "order_no")]
     pub order_no: String,
     #[serde(rename = "content_type")]
@@ -566,6 +720,12 @@ pub async fn pair_device(
     printer_type: String,
     printer_host: Option<String>,
     printer_network_port: Option<i64>,
+    routing_mode: Option<String>,
+    main_category_id: Option<String>,
+    location: Option<String>,
+    zones: Option<Vec<String>>,
+    main_category_ids: Option<Vec<String>>,
+    locations: Option<Vec<String>>,
 ) -> Result<(), String> {
     let api_base = std::env::var("PRINT_AGENT_API_URL")
         .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
@@ -591,6 +751,12 @@ pub async fn pair_device(
             printer_type,
             printer_host,
             printer_network_port,
+            routing_mode: routing_mode.clone(),
+            main_category_id: main_category_id.clone(),
+            location: location.clone(),
+            zones: zones.clone().unwrap_or_default(),
+            main_category_ids: main_category_ids.clone().unwrap_or_default(),
+            locations: locations.clone().unwrap_or_default(),
         };
 
         config::remove_agent(&app_handle, &agent.agent_id)?;
@@ -607,6 +773,12 @@ pub async fn pair_device(
         "zone": zone,
         "deviceName": device_name,
         "printerType": printer_type,
+        "routingMode": routing_mode,
+        "mainCategoryId": main_category_id,
+        "location": location,
+        "zones": zones,
+        "mainCategoryIds": main_category_ids,
+        "locations": locations,
     });
 
     log::info!("Pairing request to API: {} with body: {}", format!("{}/api/agents/pair", api_base), body);
@@ -647,6 +819,12 @@ pub async fn pair_device(
                     printer_type,
                     printer_host,
                     printer_network_port,
+                    routing_mode: routing_mode.clone(),
+                    main_category_id: main_category_id.clone(),
+                    location: location.clone(),
+                    zones: zones.clone().unwrap_or_default(),
+                    main_category_ids: main_category_ids.clone().unwrap_or_default(),
+                    locations: locations.clone().unwrap_or_default(),
                 };
 
                 config::remove_agent(&app_handle, &agent.agent_id)?;
@@ -702,7 +880,7 @@ pub async fn pair_device(
                                         company_id: pair_resp.company_id,
                                         company_code: company_code.clone(),
                                         branch_id,
-                                        zone,
+                                        zone: zone.clone(),
                                         device_name,
                                         device_token: pair_resp.device_token,
                                         printer_port,
@@ -711,6 +889,12 @@ pub async fn pair_device(
                                         printer_type,
                                         printer_host,
                                         printer_network_port,
+                                        routing_mode: routing_mode.clone(),
+                                        main_category_id: main_category_id.clone(),
+                                        location: location.clone(),
+                                        zones: zones.clone().unwrap_or_else(|| vec![zone.clone()]),
+                                        main_category_ids: main_category_ids.clone().unwrap_or_default(),
+                                        locations: locations.clone().unwrap_or_default(),
                                     };
 
                                     config::add_agent(&app_handle, new_agent)?;
@@ -752,7 +936,7 @@ pub async fn pair_device(
         company_id: pair_resp.company_id,
         company_code: company_code.clone(),
         branch_id,
-        zone,
+        zone: zone.clone(),
         device_name,
         device_token: pair_resp.device_token,
         printer_port,
@@ -761,6 +945,12 @@ pub async fn pair_device(
         printer_type,
         printer_host,
         printer_network_port,
+        routing_mode: routing_mode.clone(),
+        main_category_id: main_category_id.clone(),
+        location: location.clone(),
+        zones: zones.clone().unwrap_or_else(|| vec![zone.clone()]),
+        main_category_ids: main_category_ids.clone().unwrap_or_default(),
+        locations: locations.clone().unwrap_or_default(),
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;
@@ -789,9 +979,20 @@ pub async fn test_print(
     let target = if let Some(aid) = agent_id {
         let agent = cfg.agents.iter().find(|a| a.agent_id == aid)
             .ok_or_else(|| format!("Agent {} not found", aid))?;
-        printer::PrintTarget::from_agent_config(agent)
+        printer::PrintTarget::from_fields(
+            &agent.printer_type,
+            &agent.printer_port,
+            agent.printer_host.as_deref(),
+            agent.printer_network_port,
+        )
     } else if !cfg.agents.is_empty() {
-        printer::PrintTarget::from_agent_config(&cfg.agents[0])
+        let agent = &cfg.agents[0];
+        printer::PrintTarget::from_fields(
+            &agent.printer_type,
+            &agent.printer_port,
+            agent.printer_host.as_deref(),
+            agent.printer_network_port,
+        )
     } else {
         let printer_type = printer_type.unwrap_or_else(|| "serial".to_string());
         let printer_port = printer_port.unwrap_or_default();

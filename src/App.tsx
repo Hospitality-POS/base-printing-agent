@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./lib/invoke";
 import SetupScreen from "./screens/SetupScreen";
 import StatusScreen from "./screens/StatusScreen";
 

@@ -1,0 +1,11 @@
+[package]
+name = "printer-core"
+version = "0.1.0"
+edition = "2021"
+description = "Thermal/network printer logic shared between the Tauri app and the legacy helper"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = "4"
+log = "0.4"

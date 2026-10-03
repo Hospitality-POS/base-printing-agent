@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/invoke";
 
 interface Props {
   onPaired: (branchId: string) => void;
@@ -48,6 +48,157 @@ interface ConnectedAgentsResponse {
   count: number;
 }
 
+interface OsInfo {
+  major: number;
+  minor: number;
+  build: number;
+  name: string;
+  supportsDesktopApp: boolean;
+  supportsHelper: boolean;
+  hostname?: string;
+}
+
+interface SelectOption {
+  _id: string;
+  name: string;
+}
+
+/// Compact multi-select: selected items render as removable chips inside the
+/// field; the option list opens as a floating dropdown so it never pushes
+/// page content down.
+function OptionMultiSelect({
+  options,
+  selectedIds,
+  onChange,
+  placeholder,
+}: {
+  options: SelectOption[];
+  selectedIds: string[];
+  onChange: (ids: string[], names: string[]) => void;
+  placeholder: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selected = options.filter((o) => selectedIds.includes(o._id));
+  const filtered = query
+    ? options.filter((o) => o.name.toLowerCase().includes(query.toLowerCase()))
+    : options;
+
+  const emit = (ids: string[]) =>
+    onChange(ids, options.filter((o) => ids.includes(o._id)).map((o) => o.name));
+
+  const toggle = (id: string) =>
+    emit(selectedIds.includes(id) ? selectedIds.filter((i) => i !== id) : [...selectedIds, id]);
+
+  return (
+    <div className="relative">
+      <div
+        className="input-field h-[38px] flex items-center gap-1.5 cursor-pointer overflow-hidden"
+        onClick={() => setOpen((o) => !o)}
+      >
+        {selected.length === 0 ? (
+          <span className="text-gray-500 text-sm truncate">{placeholder}</span>
+        ) : (
+          <>
+            {selected.slice(0, 2).map((o) => (
+              <span
+                key={o._id}
+                className="inline-flex items-center gap-1 bg-blue-600/30 text-blue-200 text-xs font-medium px-2 py-0.5 rounded-full shrink-0"
+              >
+                <span className="max-w-[90px] truncate">{o.name}</span>
+                <button
+                  type="button"
+                  className="text-blue-300 hover:text-white leading-none"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggle(o._id);
+                  }}
+                >
+                  &times;
+                </button>
+              </span>
+            ))}
+            {selected.length > 2 && (
+              <span className="text-xs text-blue-300 font-medium shrink-0">
+                +{selected.length - 2}
+              </span>
+            )}
+          </>
+        )}
+        <svg
+          className={`w-3.5 h-3.5 ml-auto text-gray-500 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => { setOpen(false); setQuery(""); }} />
+          <div className="absolute z-50 left-0 right-0 mt-1 rounded-lg border border-gray-700 bg-gray-900 shadow-xl overflow-hidden">
+            <div className="p-2 border-b border-gray-700/60 space-y-2">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search..."
+                className="w-full bg-gray-800 text-sm text-gray-200 rounded px-2 py-1.5 outline-none border border-gray-700 focus:border-blue-500"
+                autoFocus
+              />
+              <div className="flex items-center justify-between text-xs px-0.5">
+                <span className="text-gray-400">
+                  {selectedIds.length} of {options.length} selected
+                </span>
+                <div className="space-x-3">
+                  <button
+                    type="button"
+                    className="text-blue-400 hover:text-blue-300"
+                    onClick={() => emit(options.map((o) => o._id))}
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    className="text-gray-400 hover:text-gray-300"
+                    onClick={() => emit([])}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="max-h-44 overflow-y-auto py-1">
+              {filtered.length === 0 && (
+                <div className="px-3 py-2 text-xs text-gray-500">No matches</div>
+              )}
+              {filtered.map((o) => {
+                const checked = selectedIds.includes(o._id);
+                return (
+                  <label
+                    key={o._id}
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm ${
+                      checked ? "bg-blue-600/20 text-white" : "text-gray-300 hover:bg-white/5"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(o._id)}
+                      className="accent-blue-500"
+                    />
+                    {o.name}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function SetupScreen({ onPaired }: Props) {
   const [companyCode, setCompanyCode] = useState("");
   const [branchId, setBranchId] = useState("");
@@ -58,8 +209,19 @@ export default function SetupScreen({ onPaired }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<ConnectedAgent | null>(null);
   const [showAgentsList, setShowAgentsList] = useState(false);
   const [showAddNew, setShowAddNew] = useState(false);
-  const [zone, setZone] = useState("");
+  const [zones, setZones] = useState<string[]>([]);
   const [deviceName, setDeviceName] = useState("");
+  const [deviceNameTouched, setDeviceNameTouched] = useState(false);
+
+  // e.g. ["Bar Area"] -> "Bar Area Printer"
+  //      ["Bar Area","Cubes"] -> "Bar Area & Cubes Printer"
+  //      ["A","B","C"] -> "A +2 more Printer"
+  const suggestDeviceName = (names: string[]): string => {
+    if (names.length === 0) return "";
+    if (names.length === 1) return `${names[0]} Printer`;
+    if (names.length === 2) return `${names[0]} & ${names[1]} Printer`;
+    return `${names[0]} +${names.length - 1} more Printer`;
+  };
   const [printerType, setPrinterType] = useState<PrinterType>("serial");
   const [printerPort, setPrinterPort] = useState("");
   const [printerHost, setPrinterHost] = useState("");
@@ -75,6 +237,11 @@ export default function SetupScreen({ onPaired }: Props) {
   const [success, setSuccess] = useState<string | null>(null);
   const [portsLoading, setPortsLoading] = useState(false);
   const [detectingPrinters, setDetectingPrinters] = useState(false);
+  const [osInfo, setOsInfo] = useState<OsInfo | null>(null);
+  const [routingMode, setRoutingMode] = useState<"category" | "location">("category");
+  const [routingOptions, setRoutingOptions] = useState<Array<{ _id: string; name: string }>>([]);
+  const [routingOptionsLoading, setRoutingOptionsLoading] = useState(false);
+  const [routingIds, setRoutingIds] = useState<string[]>([]);
 
   const loadPorts = async () => {
     setPortsLoading(true);
@@ -140,7 +307,7 @@ export default function SetupScreen({ onPaired }: Props) {
       const shopsJson = await invoke<string>("fetch_shops", { companyCode: code.trim() });
       const shopsData = JSON.parse(shopsJson) as Shop[];
       setShops(shopsData);
-      setBranchId("");
+      setBranchId(shopsData[0]?._id ?? "");
       setConnectedAgents([]);
       if (shopsData.length === 0) {
         setError("No shops found for this company code");
@@ -149,7 +316,10 @@ export default function SetupScreen({ onPaired }: Props) {
       setShops([]);
       setBranchId("");
       setConnectedAgents([]);
-      setError(e instanceof Error ? e.message : "Failed to fetch shops" + JSON.stringify(e));
+      const msg = e instanceof Error ? e.message : "Failed to fetch shops" + JSON.stringify(e);
+      if (!msg.includes("404") && !msg.includes("Tenant not found")) {
+        setError(msg);
+      }
     } finally {
       setShopsLoading(false);
     }
@@ -209,6 +379,12 @@ export default function SetupScreen({ onPaired }: Props) {
 
   useEffect(() => {
     loadPorts();
+    invoke<OsInfo>("get_os_version")
+      .then((info) => {
+        setOsInfo(info);
+        if (info?.hostname) setDeviceName(`${info.hostname} Printer`);
+      })
+      .catch(() => setOsInfo(null));
   }, []);
 
   useEffect(() => {
@@ -225,6 +401,34 @@ export default function SetupScreen({ onPaired }: Props) {
       setConnectedAgents([]);
     }
   }, [branchId]);
+
+  // Load the selectable routing options (main categories or locations)
+  // whenever the branch or routing mode changes.
+  useEffect(() => {
+    setRoutingOptions([]);
+    setRoutingIds([]);
+    setZones([]);
+    if (!branchId || !companyCode.trim()) return;
+    const cmd = routingMode === "location" ? "fetch_locations" : "fetch_categories";
+    setRoutingOptionsLoading(true);
+    invoke<string>(cmd, { shopId: branchId, companyCode: companyCode.trim() })
+      .then((json) => {
+        const data = JSON.parse(json);
+        const list: any[] = Array.isArray(data)
+          ? data
+          : data?.categories ?? data?.locations ?? data?.items ?? data?.data ?? [];
+        setRoutingOptions(
+          list
+            .map((o: any) => ({
+              _id: String(o._id ?? o.id ?? o.name),
+              name: String(o.name ?? o.label ?? o._id),
+            }))
+            .filter((o) => o.name)
+        );
+      })
+      .catch(() => setRoutingOptions([]))
+      .finally(() => setRoutingOptionsLoading(false));
+  }, [branchId, routingMode, companyCode]);
 
   const printerReady =
     printerType === "network"
@@ -259,8 +463,9 @@ export default function SetupScreen({ onPaired }: Props) {
   };
 
   const handlePair = async () => {
-    if (!companyCode.trim() || !branchId.trim() || !zone.trim() || !deviceName.trim()) {
-      setError("All fields are required.");
+    if (!companyCode.trim() || !branchId.trim() || zones.length === 0 || !deviceName.trim()) {
+      setError("All fields are required — select at least one " +
+        (routingMode === "location" ? "location" : "category") + ".");
       return;
     }
     if (!printerReady) {
@@ -274,12 +479,18 @@ export default function SetupScreen({ onPaired }: Props) {
       await invoke("pair_device", {
         companyCode: companyCode.trim(),
         branchId: branchId.trim(),
-        zone: zone.trim(),
+        zone: zones[0],
         deviceName: deviceName.trim(),
         printerPort: printerType !== "network" ? printerPort : "",
         printerType,
         printerHost: printerType === "network" ? printerHost.trim() : null,
         printerNetworkPort: printerType === "network" ? parseInt(printerNetworkPort) || 9100 : null,
+        routingMode,
+        mainCategoryId: routingMode === "category" ? routingIds[0] || null : null,
+        location: routingMode === "location" ? routingIds[0] || null : null,
+        zones,
+        mainCategoryIds: routingMode === "category" ? routingIds : null,
+        locations: routingMode === "location" ? routingIds : null,
       });
       setSuccess("Device paired successfully!");
       setTimeout(onPaired, 800);
@@ -662,11 +873,27 @@ export default function SetupScreen({ onPaired }: Props) {
       <div className="w-full max-w-md">
         {/* Header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center mb-4">
-            <img src="/logo.png" alt="Base" className="h-12 w-auto" />
+          <div className="flex flex-col items-center gap-1.5 mb-5">
+            <img src="/logo.png" alt="Base" className="h-16 w-auto" />
+            <span className="text-green-500/80 text-[11px] font-medium uppercase tracking-[0.25em]">
+              Achieve More
+            </span>
           </div>
-          <h1 className="text-2xl font-semibold text-white">PrintAgent Setup</h1>
-          <p className="text-gray-400 text-sm mt-1">Configure this device to connect to your print network</p>
+          <h1 className="text-2xl font-semibold text-white tracking-tight">PrintAgent Setup</h1>
+          <p className="text-gray-400 text-sm mt-1.5">Configure this device to connect to your print network</p>
+          {osInfo && (
+            <div className="mt-3">
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
+                osInfo.supportsDesktopApp
+                  ? "bg-gray-800/60 border-gray-700/60 text-gray-400"
+                  : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${osInfo.supportsDesktopApp ? "bg-green-500" : "bg-amber-400"}`} />
+                {osInfo.name} ({osInfo.major}.{osInfo.minor}.{osInfo.build})
+                {osInfo.supportsDesktopApp ? "" : " — use web version + helper"}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Form Card */}
@@ -860,21 +1087,69 @@ export default function SetupScreen({ onPaired }: Props) {
                 ← Back
               </button>
 
+              <Field label="Route Jobs By" required>
+                <div className="flex rounded-lg border border-gray-700 overflow-hidden">
+                  {(["category", "location"] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setRoutingMode(m)}
+                      className={`flex-1 py-2 text-sm font-medium transition-colors ${
+                        routingMode === m
+                          ? "bg-green-600 text-white"
+                          : "bg-gray-800 text-gray-400 hover:text-gray-200"
+                      }`}
+                    >
+                      {m === "category" ? "Main Category" : "Location"}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Zone" required>
-                  <input
-                    type="text"
-                    value={zone}
-                    onChange={(e) => setZone(e.target.value)}
-                    placeholder="e.g. kitchen"
-                    className="input-field"
-                  />
+                <Field label={routingMode === "location" ? "Locations" : "Zones / Categories"} required>
+                  {routingOptionsLoading ? (
+                    <div className="input-field flex items-center text-gray-500 text-sm">
+                      <div className="w-4 h-4 border border-gray-500 border-t-transparent rounded-full animate-spin mr-2" />
+                      Loading...
+                    </div>
+                  ) : routingOptions.length > 0 ? (
+                    <OptionMultiSelect
+                      options={routingOptions}
+                      selectedIds={routingIds}
+                      placeholder={
+                        routingMode === "location"
+                          ? "Select locations..."
+                          : "Select categories..."
+                      }
+                      onChange={(ids, names) => {
+                        setRoutingIds(ids);
+                        setZones(names);
+                        if (!deviceNameTouched) setDeviceName(suggestDeviceName(names));
+                      }}
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      value={zones.join(", ")}
+                      onChange={(e) => {
+                        const names = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+                        setZones(names);
+                        setRoutingIds(names);
+                      }}
+                      placeholder={
+                        routingMode === "location"
+                          ? "e.g. Ground Floor, Patio"
+                          : "e.g. Kitchen, Bar"
+                      }
+                      className="input-field"
+                    />
+                  )}
                 </Field>
                 <Field label="Device Name" required>
                   <input
                     type="text"
                     value={deviceName}
-                    onChange={(e) => setDeviceName(e.target.value)}
+                    onChange={(e) => { setDeviceNameTouched(true); setDeviceName(e.target.value); }}
                     placeholder="e.g. Kitchen Printer"
                     className="input-field"
                   />
@@ -919,9 +1194,14 @@ export default function SetupScreen({ onPaired }: Props) {
           )}
         </div>
 
-        <p className="text-center text-gray-600 text-xs mt-4">
-          PrintAgent v0.1.0 — Silent Print Routing
-        </p>
+        <div className="text-center mt-6 space-y-0.5">
+          <p className="text-gray-600 text-[11px]">
+            PrintAgent v0.1.0 — Silent Print Routing
+          </p>
+          <p className="text-gray-700 text-[11px]">
+            A product of Basepoint Cloud Inc
+          </p>
+        </div>
       </div>
     </div>
   );

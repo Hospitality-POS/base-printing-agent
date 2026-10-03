@@ -26,6 +26,54 @@ pub struct AgentConfig {
     pub printer_host: Option<String>,
     #[serde(default)]
     pub printer_network_port: Option<i64>,
+    /// "category" (default) routes jobs by main category / zone;
+    /// "location" routes jobs by dining location/section.
+    #[serde(default)]
+    pub routing_mode: Option<String>,
+    #[serde(default)]
+    pub main_category_id: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Multiple routing targets (one agent can serve several categories or
+    /// locations). `zone`/`main_category_id`/`location` remain as the
+    /// single-value fields for backwards compatibility.
+    #[serde(default)]
+    pub zones: Vec<String>,
+    #[serde(default)]
+    pub main_category_ids: Vec<String>,
+    #[serde(default)]
+    pub locations: Vec<String>,
+}
+
+impl AgentConfig {
+    /// All routing values this agent accepts, singular + plural combined.
+    pub fn all_zones(&self) -> Vec<String> {
+        let mut v = self.zones.clone();
+        if !self.zone.is_empty() && !v.contains(&self.zone) {
+            v.push(self.zone.clone());
+        }
+        v
+    }
+
+    pub fn all_main_category_ids(&self) -> Vec<String> {
+        let mut v = self.main_category_ids.clone();
+        if let Some(id) = &self.main_category_id {
+            if !id.is_empty() && !v.contains(id) {
+                v.push(id.clone());
+            }
+        }
+        v
+    }
+
+    pub fn all_locations(&self) -> Vec<String> {
+        let mut v = self.locations.clone();
+        if let Some(loc) = &self.location {
+            if !loc.is_empty() && !v.contains(loc) {
+                v.push(loc.clone());
+            }
+        }
+        v
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
