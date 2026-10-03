@@ -1,5 +1,8 @@
 name: Build Installers (Windows)
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -48,13 +51,17 @@ jobs:
               });
               return data.id;
             } catch (e) {
-              // Release already exists (e.g. re-run) — reuse it
-              const { data } = await github.rest.repos.getReleaseByTag({
+              // Release already exists (e.g. re-run) — reuse it.
+              // NOTE: getReleaseByTag does not return drafts; list does.
+              const { data: releases } = await github.rest.repos.listReleases({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag,
+                per_page: 30,
               });
-              return data.id;
+              const existing = releases.find((r) => r.tag_name === tag);
+              if (!existing) throw e;
+              console.log(`Reusing existing release ${existing.id} for tag ${tag}`);
+              return existing.id;
             }
 
   # ── Step 2a: modern desktop app (Windows 10/11, WebView2) ────────────────
