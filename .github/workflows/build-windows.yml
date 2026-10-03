@@ -102,11 +102,12 @@ jobs:
           node-version: 20
           cache: "npm"
 
-      # Nightly + rust-src is required for `-Z build-std` on the win7 targets
+      # Nightly + rust-src is required for `-Z build-std` on the win7 targets.
+      # (win7 targets have no prebuilt rust-std — std is compiled from source,
+      # so we must NOT list them in `targets:`)
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
-          targets: x86_64-win7-windows-msvc, i686-win7-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
