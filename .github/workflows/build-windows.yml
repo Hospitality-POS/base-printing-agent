@@ -58,10 +58,23 @@ jobs:
                 repo: context.repo.repo,
                 per_page: 30,
               });
-              const existing = releases.find((r) => r.tag_name === tag);
-              if (!existing) throw e;
-              console.log(`Reusing existing release ${existing.id} for tag ${tag}`);
-              return existing.id;
+              const sameTag = releases.filter((r) => r.tag_name === tag);
+              if (sameTag.length === 0) throw e;
+              // Prefer an already-published release; otherwise keep the first
+              // draft and remove duplicates so publishing can't conflict.
+              const keep = sameTag.find((r) => !r.draft) || sameTag[0];
+              for (const r of sameTag) {
+                if (r.id !== keep.id && r.draft) {
+                  await github.rest.repos.deleteRelease({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: r.id,
+                  });
+                  console.log(`Deleted duplicate draft release ${r.id}`);
+                }
+              }
+              console.log(`Reusing existing release ${keep.id} for tag ${tag}`);
+              return keep.id;
             }
 
   # ── Step 2a: modern desktop app (Windows 10/11, WebView2) ────────────────
@@ -184,6 +197,10 @@ jobs:
                 draft: false,
               });
             } catch (error) {
+              if (error.status === 422) {
+                console.log('A published release already exists for this tag — nothing to publish');
+                return;
+              }
               if (error.status === 404) {
                 console.log('Release not found, creating new release instead');
                 const tag = "${{ needs.create-release.outputs.tag }}";
