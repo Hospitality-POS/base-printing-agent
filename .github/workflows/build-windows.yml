@@ -151,12 +151,18 @@ jobs:
           npm run build
           Copy-Item -Recurse -Force dist installer/web
 
+      # +crt-static statically links the MSVC runtime — the helper must run on
+      # machines with no VCRUNTIME140.dll (typical Windows 7 POS terminals).
       - name: Build helper (64-bit, Win7 target)
         working-directory: src-tauri
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release -p print-agent-helper
 
       - name: Build helper (32-bit, Win7 target)
         working-directory: src-tauri
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo +nightly build -Z build-std=std,panic_abort --target i686-win7-windows-msvc --release -p print-agent-helper
 
       - name: Install NSIS
