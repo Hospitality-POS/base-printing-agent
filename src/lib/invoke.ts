@@ -15,6 +15,8 @@ export async function invoke<T>(
 
 // ---------- Web (browser) fallback ----------
 
+const LIVE_API_URL = "https://api.hospitality.reliatech.co.ke";
+
 const API_BASE: string =
   (import.meta.env.VITE_PRINT_AGENT_API_URL as string | undefined) ??
   "/agent-api";
@@ -75,6 +77,7 @@ interface AgentConfig {
 
 interface Config {
   agents: AgentConfig[];
+  apiUrl?: string;
 }
 
 function loadConfig(): Config {
@@ -91,8 +94,42 @@ function saveConfig(cfg: Config) {
   localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg));
 }
 
+function normalizeApiUrl(url?: string | null) {
+  const cleaned = url?.trim().replace(/\/+$/, "");
+  return cleaned || undefined;
+}
+
+function configuredApiUrl() {
+  return normalizeApiUrl(loadConfig().apiUrl);
+}
+
+function envApiUrl() {
+  return normalizeApiUrl(
+    import.meta.env.VITE_PRINT_AGENT_API_URL as string | undefined
+  );
+}
+
+function isHelperOrigin() {
+  try {
+    const helper = new URL(HELPER_BASE);
+    if (window.location.origin === helper.origin) return true;
+    const localHosts = new Set(["localhost", "127.0.0.1"]);
+    return (
+      window.location.port === helper.port &&
+      localHosts.has(window.location.hostname) &&
+      localHosts.has(helper.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function apiUrl(path: string) {
-  return `${API_BASE}${path}`;
+  const configured = configuredApiUrl();
+  // When the page is served by the local helper, keep requests same-origin so
+  // the helper can proxy to whichever API URL was selected during setup.
+  if (configured && isHelperOrigin()) return `/agent-api${path}`;
+  return `${configured ?? API_BASE}${path}`;
 }
 
 async function apiFetch(
@@ -130,6 +167,36 @@ async function webInvoke<T>(
   switch (cmd) {
     case "get_config":
       return loadConfig() as T;
+
+    case "get_api_url": {
+      const configured = configuredApiUrl();
+      try {
+        const helperUrl = await helperInvoke<string>("get_api_url", {});
+        const normalized = normalizeApiUrl(helperUrl);
+        const cfg = loadConfig();
+        if (normalized) cfg.apiUrl = normalized;
+        else delete cfg.apiUrl;
+        saveConfig(cfg);
+        return (normalized ?? LIVE_API_URL) as T;
+      } catch {
+        return (configured ?? envApiUrl() ?? LIVE_API_URL) as T;
+      }
+    }
+
+    case "set_api_url": {
+      const normalized = normalizeApiUrl(args.url as string | undefined);
+      const cfg = loadConfig();
+      if (normalized) cfg.apiUrl = normalized;
+      else delete cfg.apiUrl;
+      saveConfig(cfg);
+      try {
+        await helperInvoke("set_api_url", { url: normalized ?? null });
+      } catch {
+        // The helper only exists in the installed legacy flow; browser/dev
+        // mode can still use the value stored in localStorage.
+      }
+      return undefined as T;
+    }
 
     case "get_agent_status": {
       const cfg = loadConfig();
@@ -244,6 +311,10 @@ async function webInvoke<T>(
         (a) => a.zone === args.zone && a.branchId === args.branchId
       );
       if (existing) {
+        const selectedApi = configuredApiUrl();
+        if (selectedApi && selectedApi !== LIVE_API_URL) {
+          existing.wsUrl = `${selectedApi.replace(/^http/, "ws")}/ws/agent`;
+        }
         existing.deviceName = (args.deviceName as string) ?? existing.deviceName;
         existing.printerPort = (args.printerPort as string) ?? "";
         existing.printerType = (args.printerType as string) ?? "serial";
@@ -279,6 +350,11 @@ async function webInvoke<T>(
       });
       await ensureOk(resp, "Pairing");
       const pair = await resp.json();
+      const selectedApi = configuredApiUrl() ?? LIVE_API_URL;
+      const wsUrl =
+        selectedApi === LIVE_API_URL
+          ? pair.wsUrl ?? ""
+          : `${selectedApi.replace(/^http/, "ws")}/ws/agent`;
 
       cfg.agents.push({
         agentId: pair.agentId,
@@ -290,7 +366,7 @@ async function webInvoke<T>(
         deviceToken: pair.deviceToken ?? "",
         printerPort: (args.printerPort as string) ?? "",
         paperWidth: 80,
-        wsUrl: pair.wsUrl ?? "",
+        wsUrl,
         printerType: (args.printerType as string) ?? "serial",
         printerHost: args.printerHost as string | undefined,
         printerNetworkPort: args.printerNetworkPort as number | undefined,

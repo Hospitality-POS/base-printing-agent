@@ -6,6 +6,16 @@ interface Props {
 }
 
 type PrinterType = "serial" | "network" | "windows";
+type ApiEnvironment = "live" | "local";
+
+const LIVE_API_URL = "https://api.hospitality.reliatech.co.ke";
+const LOCAL_API_URL =
+  (import.meta.env.VITE_PRINT_AGENT_LOCAL_API_URL as string | undefined) ??
+  "http://localhost:3002";
+
+function normalizeApiUrl(url: string) {
+  return url.trim().replace(/\/+$/, "");
+}
 
 interface Shop {
   _id: string;
@@ -200,6 +210,11 @@ function OptionMultiSelect({
 }
 
 export default function SetupScreen({ onPaired }: Props) {
+  const [apiEnvironment, setApiEnvironment] = useState<ApiEnvironment>("live");
+  const [apiUrl, setApiUrl] = useState(LIVE_API_URL);
+  const [localApiUrl, setLocalApiUrl] = useState(LOCAL_API_URL);
+  const [savedApiUrl, setSavedApiUrl] = useState("");
+  const [apiUrlLoaded, setApiUrlLoaded] = useState(false);
   const [companyCode, setCompanyCode] = useState("");
   const [branchId, setBranchId] = useState("");
   const [shops, setShops] = useState<Shop[]>([]);
@@ -341,6 +356,18 @@ export default function SetupScreen({ onPaired }: Props) {
   };
 
   const handleViewAgents = async () => {
+    if (!apiUrlIsValid) {
+      setError("Enter a valid API URL starting with http:// or https://.");
+      return;
+    }
+    const normalizedApiUrl = normalizeApiUrl(apiUrl);
+    try {
+      await invoke("set_api_url", { url: normalizedApiUrl });
+      setSavedApiUrl(normalizedApiUrl);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    }
     for (const agent of connectedAgents) {
       try {
         await invoke("auto_add_connected_agent", {
@@ -385,22 +412,50 @@ export default function SetupScreen({ onPaired }: Props) {
         if (info?.hostname) setDeviceName(`${info.hostname} Printer`);
       })
       .catch(() => setOsInfo(null));
+    invoke<string>("get_api_url")
+      .then((url) => {
+        const normalized = normalizeApiUrl(url || LIVE_API_URL) || LIVE_API_URL;
+        setApiUrl(normalized);
+        setSavedApiUrl(normalized);
+        setApiEnvironment(normalized === LIVE_API_URL ? "live" : "local");
+        if (normalized !== LIVE_API_URL) setLocalApiUrl(normalized);
+      })
+      .catch(() => {
+        setApiUrl(LIVE_API_URL);
+        setApiEnvironment("live");
+      })
+      .finally(() => setApiUrlLoaded(true));
   }, []);
 
   useEffect(() => {
+    if (!apiUrlLoaded) return;
+    const normalized = normalizeApiUrl(apiUrl);
+    if (!/^https?:\/\//.test(normalized)) return;
+    const timer = setTimeout(() => {
+      invoke("set_api_url", { url: normalized })
+        .then(() => setSavedApiUrl(normalized))
+        .catch((e) =>
+          setError(e instanceof Error ? e.message : String(e))
+        );
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [apiUrl, apiUrlLoaded]);
+
+  useEffect(() => {
+    if (!apiUrlLoaded) return;
     const timer = setTimeout(() => {
       fetchShops(companyCode);
     }, 1500);
     return () => clearTimeout(timer);
-  }, [companyCode]);
+  }, [companyCode, savedApiUrl, apiUrlLoaded]);
 
   useEffect(() => {
-    if (branchId && companyCode.trim()) {
+    if (apiUrlLoaded && branchId && companyCode.trim()) {
       fetchConnectedAgents(companyCode.trim(), branchId);
     } else {
       setConnectedAgents([]);
     }
-  }, [branchId]);
+  }, [branchId, savedApiUrl, apiUrlLoaded]);
 
   // Load the selectable routing options (main categories or locations)
   // whenever the branch or routing mode changes.
@@ -408,7 +463,7 @@ export default function SetupScreen({ onPaired }: Props) {
     setRoutingOptions([]);
     setRoutingIds([]);
     setZones([]);
-    if (!branchId || !companyCode.trim()) return;
+    if (!apiUrlLoaded || !branchId || !companyCode.trim()) return;
     const cmd = routingMode === "location" ? "fetch_locations" : "fetch_categories";
     setRoutingOptionsLoading(true);
     invoke<string>(cmd, { shopId: branchId, companyCode: companyCode.trim() })
@@ -428,7 +483,21 @@ export default function SetupScreen({ onPaired }: Props) {
       })
       .catch(() => setRoutingOptions([]))
       .finally(() => setRoutingOptionsLoading(false));
-  }, [branchId, routingMode, companyCode]);
+  }, [branchId, routingMode, companyCode, savedApiUrl, apiUrlLoaded]);
+
+  const apiUrlIsValid = /^https?:\/\//.test(normalizeApiUrl(apiUrl));
+
+  const handleApiEnvironmentChange = (environment: ApiEnvironment) => {
+    setApiEnvironment(environment);
+    setApiUrl(environment === "live" ? LIVE_API_URL : localApiUrl || LOCAL_API_URL);
+    setShops([]);
+    setBranchId("");
+    setConnectedAgents([]);
+    setRoutingOptions([]);
+    setRoutingIds([]);
+    setZones([]);
+    setSelectedAgent(null);
+  };
 
   const printerReady =
     printerType === "network"
@@ -463,6 +532,10 @@ export default function SetupScreen({ onPaired }: Props) {
   };
 
   const handlePair = async () => {
+    if (!apiUrlIsValid) {
+      setError("Enter a valid API URL starting with http:// or https://.");
+      return;
+    }
     if (!companyCode.trim() || !branchId.trim() || zones.length === 0 || !deviceName.trim()) {
       setError("All fields are required — select at least one " +
         (routingMode === "location" ? "location" : "category") + ".");
@@ -476,6 +549,9 @@ export default function SetupScreen({ onPaired }: Props) {
     setError(null);
     setSuccess(null);
     try {
+      const normalizedApiUrl = normalizeApiUrl(apiUrl);
+      await invoke("set_api_url", { url: normalizedApiUrl });
+      setSavedApiUrl(normalizedApiUrl);
       await invoke("pair_device", {
         companyCode: companyCode.trim(),
         branchId: branchId.trim(),
@@ -502,6 +578,10 @@ export default function SetupScreen({ onPaired }: Props) {
   };
 
   const handleConnectToExisting = async () => {
+    if (!apiUrlIsValid) {
+      setError("Enter a valid API URL starting with http:// or https://.");
+      return;
+    }
     if (!selectedAgent || !companyCode.trim()) {
       setError("Please select an agent.");
       return;
@@ -514,6 +594,9 @@ export default function SetupScreen({ onPaired }: Props) {
     setError(null);
     setSuccess(null);
     try {
+      const normalizedApiUrl = normalizeApiUrl(apiUrl);
+      await invoke("set_api_url", { url: normalizedApiUrl });
+      setSavedApiUrl(normalizedApiUrl);
       await invoke("connect_to_existing_agent", {
         companyCode: companyCode.trim(),
         agentId: selectedAgent.agent_id,
@@ -898,6 +981,34 @@ export default function SetupScreen({ onPaired }: Props) {
 
         {/* Form Card */}
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-4">
+          <Field label="API Environment" required>
+            <div className="grid grid-cols-[120px,1fr] gap-2">
+              <select
+                value={apiEnvironment}
+                onChange={(e) => handleApiEnvironmentChange(e.target.value as ApiEnvironment)}
+                className="input-field"
+              >
+                <option value="live">Live</option>
+                <option value="local">Local</option>
+              </select>
+              <input
+                type="text"
+                value={apiUrl}
+                onChange={(e) => {
+                  setApiUrl(e.target.value);
+                  if (apiEnvironment === "local") setLocalApiUrl(e.target.value);
+                }}
+                disabled={apiEnvironment === "live"}
+                placeholder={LOCAL_API_URL}
+                className="input-field disabled:opacity-60 disabled:cursor-not-allowed"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck="false"
+              />
+            </div>
+          </Field>
+
           <Field label="Company Code" required>
             <input
               type="text"

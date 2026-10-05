@@ -88,6 +88,61 @@ fn main() {
 
 const REMOTE_API: &str = "https://api.hospitality.reliatech.co.ke";
 
+fn helper_config_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("print-agent-helper.json")))
+        .unwrap_or_else(|| std::path::PathBuf::from("print-agent-helper.json"))
+}
+
+fn load_helper_config() -> Value {
+    std::fs::read_to_string(helper_config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn save_helper_config(mut cfg: Value) -> Result<(), String> {
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    let body = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    std::fs::write(helper_config_path(), body).map_err(|e| e.to_string())
+}
+
+fn configured_api_base() -> String {
+    load_helper_config()["apiUrl"]
+        .as_str()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(|u| u.trim_end_matches('/').to_string())
+        .or_else(|| std::env::var("PRINT_AGENT_API_URL").ok())
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| REMOTE_API.to_string())
+}
+
+fn set_helper_api_url(url: Option<&str>) -> Result<(), String> {
+    let cleaned = url
+        .map(str::trim)
+        .map(|u| u.trim_end_matches('/'))
+        .filter(|u| !u.is_empty())
+        .map(str::to_string);
+    let mut cfg = load_helper_config();
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    match cleaned {
+        Some(u) => cfg["apiUrl"] = json!(u),
+        None => {
+            if let Some(obj) = cfg.as_object_mut() {
+                obj.remove("apiUrl");
+            }
+        }
+    }
+    save_helper_config(cfg)
+}
+
 /// Proxy /agent-api/* to the remote API. Keeps everything same-origin (no CORS)
 /// and gives legacy machines rustls TLS instead of relying on old system TLS.
 fn proxy_api(
@@ -95,8 +150,7 @@ fn proxy_api(
     path: &str,
     request: &mut tiny_http::Request,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| REMOTE_API.to_string());
+    let api_base = configured_api_base();
     let url = format!("{}{}", api_base, &path["/agent-api".len()..]);
 
     let mut req = ureq::request(method, &url).timeout(Duration::from_secs(20));
@@ -195,8 +249,8 @@ fn with_cors(response: tiny_http::Response<std::io::Cursor<Vec<u8>>>) -> tiny_ht
     let mut r = response;
     for (name, value) in [
         ("Access-Control-Allow-Origin", "*"),
-        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-        ("Access-Control-Allow-Headers", "Content-Type"),
+        ("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+        ("Access-Control-Allow-Headers", "Content-Type, companycode"),
     ] {
         if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             r.add_header(h);
@@ -237,6 +291,11 @@ fn dispatch(cmd: &str, args: &Value) -> tiny_http::Response<std::io::Cursor<Vec<
         "get_os_version" | "get_windows_version" => {
             ok_response(serde_json::to_value(printer_core::get_os_info()).unwrap())
         }
+        "get_api_url" => ok_response(json!(configured_api_base())),
+        "set_api_url" => match set_helper_api_url(args["url"].as_str()) {
+            Ok(()) => ok_response(Value::Null),
+            Err(e) => error_response(&e),
+        },
         "compatibility_report" => {
             ok_response(json!(printer_core::compatibility_report()))
         }

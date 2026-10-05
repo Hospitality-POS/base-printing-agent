@@ -8,6 +8,34 @@ use tauri::State;
 
 pub use printer_core::{PrintJob, PrintJobLine};
 
+pub const LIVE_API_URL: &str = "https://api.hospitality.reliatech.co.ke";
+
+/// API base URL resolution order: user-selected URL in config (Local/Live
+/// toggle) -> PRINT_AGENT_API_URL env -> live default.
+pub fn api_base(app_handle: &tauri::AppHandle) -> String {
+    config::load_config(app_handle)
+        .and_then(|c| c.api_url)
+        .or_else(|| std::env::var("PRINT_AGENT_API_URL").ok())
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| LIVE_API_URL.to_string())
+}
+
+#[tauri::command]
+pub fn get_api_url(app_handle: tauri::AppHandle) -> String {
+    api_base(&app_handle)
+}
+
+#[tauri::command]
+pub fn set_api_url(app_handle: tauri::AppHandle, url: Option<String>) -> Result<(), String> {
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    let cleaned = url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty());
+    cfg.api_url = cleaned;
+    config::save_config(&app_handle, &cfg)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
@@ -164,9 +192,8 @@ pub struct Shop {
 }
 
 #[tauri::command]
-pub async fn fetch_shops(company_code: String) -> Result<String, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+pub async fn fetch_shops(app_handle: tauri::AppHandle, company_code: String) -> Result<String, String> {
+    let api_base = api_base(&app_handle);
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/shops", api_base);
@@ -198,9 +225,8 @@ pub async fn fetch_shops(company_code: String) -> Result<String, String> {
 /// vars because the exact backend routes may differ per deployment:
 ///   PRINT_AGENT_CATEGORIES_PATH (default: /api/main-categories)
 ///   PRINT_AGENT_LOCATIONS_PATH  (default: /api/locations)
-async fn fetch_routing_options(path_env: &str, default_path: &str, shop_id: &str, company_code: &str) -> Result<String, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+async fn fetch_routing_options(app_handle: &tauri::AppHandle, path_env: &str, default_path: &str, shop_id: &str, company_code: &str) -> Result<String, String> {
+    let api_base = api_base(app_handle);
     let path = std::env::var(path_env).unwrap_or_else(|_| default_path.to_string());
     let sep = if path.contains('?') { "&" } else { "?" };
     let url = format!("{}{}{}{}", api_base, path, sep, format!("shop_id={}", urlencoding::encode(shop_id)));
@@ -224,9 +250,8 @@ async fn fetch_routing_options(path_env: &str, default_path: &str, shop_id: &str
 
 /// Fallback when no dedicated list endpoint exists: derive distinct option
 /// values from pending print jobs for the shop.
-async fn derive_options_from_jobs(shop_id: &str, company_code: &str, field: &str) -> Result<String, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+async fn derive_options_from_jobs(app_handle: &tauri::AppHandle, shop_id: &str, company_code: &str, field: &str) -> Result<String, String> {
+    let api_base = api_base(app_handle);
     let url = format!("{}/api/agents/pending-jobs?shop_id={}", api_base, urlencoding::encode(shop_id));
 
     let resp = reqwest::Client::new()
@@ -264,8 +289,9 @@ async fn derive_options_from_jobs(shop_id: &str, company_code: &str, field: &str
 }
 
 #[tauri::command]
-pub async fn fetch_categories(shop_id: String, company_code: String) -> Result<String, String> {
+pub async fn fetch_categories(app_handle: tauri::AppHandle, shop_id: String, company_code: String) -> Result<String, String> {
     match fetch_routing_options(
+        &app_handle,
         "PRINT_AGENT_CATEGORIES_PATH",
         "/categories/main-categories",
         &shop_id,
@@ -274,13 +300,14 @@ pub async fn fetch_categories(shop_id: String, company_code: String) -> Result<S
     .await
     {
         Ok(s) => Ok(s),
-        Err(_) => derive_options_from_jobs(&shop_id, &company_code, "zone").await,
+        Err(_) => derive_options_from_jobs(&app_handle, &shop_id, &company_code, "zone").await,
     }
 }
 
 #[tauri::command]
-pub async fn fetch_locations(shop_id: String, company_code: String) -> Result<String, String> {
+pub async fn fetch_locations(app_handle: tauri::AppHandle, shop_id: String, company_code: String) -> Result<String, String> {
     match fetch_routing_options(
+        &app_handle,
         "PRINT_AGENT_LOCATIONS_PATH",
         "/tables/location/locations",
         &shop_id,
@@ -289,18 +316,18 @@ pub async fn fetch_locations(shop_id: String, company_code: String) -> Result<St
     .await
     {
         Ok(s) => Ok(s),
-        Err(_) => derive_options_from_jobs(&shop_id, &company_code, "location").await,
+        Err(_) => derive_options_from_jobs(&app_handle, &shop_id, &company_code, "location").await,
     }
 }
 
 #[tauri::command]
 pub async fn list_agents(
+    app_handle: tauri::AppHandle,
     company_code: String,
     branch_id: String,
     zone: Option<String>,
 ) -> Result<String, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(&app_handle);
 
     let client = reqwest::Client::new();
 
@@ -334,11 +361,11 @@ pub async fn list_agents(
 
 #[tauri::command]
 pub async fn fetch_connected_agents(
+    app_handle: tauri::AppHandle,
     company_code: String,
     shop_id: String,
 ) -> Result<String, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(&app_handle);
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/connected?shop_id={}", api_base, shop_id);
@@ -403,8 +430,7 @@ pub async fn auto_add_connected_agent(
         return Ok(());
     }
 
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(&app_handle);
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/{}", api_base, agent_id);
 
@@ -459,12 +485,11 @@ pub async fn auto_add_connected_agent(
 }
 
 async fn sync_agent_to_api(
-    _app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle,
     agent: &config::AgentConfig,
     company_code: &str,
 ) -> Result<(), String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(app_handle);
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/{}/update", api_base, agent.agent_id);
@@ -582,12 +607,12 @@ pub struct PendingJob {
 
 #[tauri::command]
 pub async fn fetch_pending_jobs(
+    app_handle: tauri::AppHandle,
     shop_id: String,
     zone: String,
     status: Option<String>,
 ) -> Result<String, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(&app_handle);
 
     let client = reqwest::Client::new();
 
@@ -626,8 +651,7 @@ pub async fn update_agent_printer_port(
     printer_network_port: Option<i64>,
     company_code: String,
 ) -> Result<(), String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(&app_handle);
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/{}/update", api_base, agent_id);
@@ -727,8 +751,15 @@ pub async fn pair_device(
     main_category_ids: Option<Vec<String>>,
     locations: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = api_base(&app_handle);
+
+    // The API returns a hardcoded WS URL; when pointing at a local/custom
+    // API, derive the WS endpoint from the same host instead.
+    let derived_ws_url = if api_base == LIVE_API_URL {
+        None
+    } else {
+        Some(format!("{}/ws/agent", api_base.replacen("http", "ws", 1)))
+    };
 
     let client = reqwest::Client::new();
 
@@ -747,7 +778,7 @@ pub async fn pair_device(
             device_token: agent.device_token.clone(),
             printer_port,
             paper_width: 80,
-            ws_url: agent.ws_url.clone(),
+            ws_url: derived_ws_url.clone().unwrap_or_else(|| agent.ws_url.clone()),
             printer_type,
             printer_host,
             printer_network_port,
@@ -815,7 +846,7 @@ pub async fn pair_device(
                     device_token: agent.device_token.clone(),
                     printer_port,
                     paper_width: 80,
-                    ws_url: agent.ws_url.clone(),
+                    ws_url: derived_ws_url.clone().unwrap_or_else(|| agent.ws_url.clone()),
                     printer_type,
                     printer_host,
                     printer_network_port,
@@ -835,7 +866,7 @@ pub async fn pair_device(
                 return Ok(());
             } else {
                 log::info!("No local agent found, attempting to list and unpair existing agent from server...");
-                let list_resp = list_agents(company_code.clone(), branch_id.clone(), Some(zone.clone())).await;
+                let list_resp = list_agents(app_handle.clone(), company_code.clone(), branch_id.clone(), Some(zone.clone())).await;
 
                 match list_resp {
                     Ok(agents_json) => {
@@ -885,7 +916,7 @@ pub async fn pair_device(
                                         device_token: pair_resp.device_token,
                                         printer_port,
                                         paper_width: 80,
-                                        ws_url: pair_resp.ws_url,
+                                        ws_url: derived_ws_url.clone().unwrap_or(pair_resp.ws_url),
                                         printer_type,
                                         printer_host,
                                         printer_network_port,
@@ -941,7 +972,7 @@ pub async fn pair_device(
         device_token: pair_resp.device_token,
         printer_port,
         paper_width: 80,
-        ws_url: pair_resp.ws_url,
+        ws_url: derived_ws_url.clone().unwrap_or(pair_resp.ws_url),
         printer_type,
         printer_host,
         printer_network_port,
@@ -1104,9 +1135,8 @@ pub async fn test_printer_connection(
 }
 
 #[tauri::command]
-pub async fn fetch_agents_from_api(shop_id: String, company_code: String) -> Result<Vec<ServerAgent>, String> {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+pub async fn fetch_agents_from_api(app_handle: tauri::AppHandle, shop_id: String, company_code: String) -> Result<Vec<ServerAgent>, String> {
+    let api_base = api_base(&app_handle);
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/list?shop_id={}", api_base, shop_id);
 

@@ -141,6 +141,8 @@ pub fn run() {
             commands::detect_thermal_printers,
             commands::list_windows_printers,
             commands::discover_network_printers,
+            commands::get_api_url,
+            commands::set_api_url,
             commands::fetch_shops,
             commands::list_agents,
             commands::fetch_connected_agents,

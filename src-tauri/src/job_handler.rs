@@ -33,7 +33,7 @@ pub async fn handle_print_job(
     };
 
     // Update job status on the API (both success and failure)
-    update_job_status_on_api(&job, status, agent_id, company_code).await;
+    update_job_status_on_api(&job, status, agent_id, company_code, &state.app_handle).await;
 
     // Send WebSocket ack if we have an active connection
     // (no-op on the polling path since there is no WS sender)
@@ -60,9 +60,9 @@ async fn update_job_status_on_api(
     status: &str,
     agent_id: &str,
     company_code: &str,
+    app_handle: &tauri::AppHandle,
 ) {
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = crate::commands::api_base(app_handle);
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/print-jobs/ack", api_base);

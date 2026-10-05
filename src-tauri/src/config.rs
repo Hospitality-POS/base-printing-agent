@@ -80,12 +80,17 @@ impl AgentConfig {
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub agents: Vec<AgentConfig>,
+    /// Optional API base URL override (e.g. http://localhost:3002 for local
+    /// development). Falls back to the live API when unset.
+    #[serde(default)]
+    pub api_url: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             agents: Vec::new(),
+            api_url: None,
         }
     }
 }

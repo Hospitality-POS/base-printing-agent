@@ -379,8 +379,7 @@ async fn fetch_and_process_jobs(
 
     let printer_target = build_printer_target(agent)?;
 
-    let api_base = std::env::var("PRINT_AGENT_API_URL")
-        .unwrap_or_else(|_| "https://api.hospitality.reliatech.co.ke".to_string());
+    let api_base = crate::commands::api_base(&state.app_handle);
 
     let client = reqwest::Client::new();
 
