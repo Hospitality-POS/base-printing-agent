@@ -135,8 +135,11 @@ jobs:
       # Nightly + rust-src is required for `-Z build-std` on the win7 targets.
       # (win7 targets have no prebuilt rust-std — std is compiled from source,
       # so we must NOT list them in `targets:`)
-      - uses: dtolnay/rust-toolchain@nightly
+      # Pinned: nightly-2026-10-15 broke std for win7 targets (missing
+      # `is_console` in sys/stdio/windows.rs). Bump deliberately after testing.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-10-01
           components: rust-src
 
       - uses: Swatinem/rust-cache@v2
@@ -157,13 +160,13 @@ jobs:
         working-directory: src-tauri
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release -p print-agent-helper
+        run: cargo +nightly-2026-10-01 build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release -p print-agent-helper
 
       - name: Build helper (32-bit, Win7 target)
         working-directory: src-tauri
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo +nightly build -Z build-std=std,panic_abort --target i686-win7-windows-msvc --release -p print-agent-helper
+        run: cargo +nightly-2026-10-01 build -Z build-std=std,panic_abort --target i686-win7-windows-msvc --release -p print-agent-helper
 
       - name: Install NSIS
         run: choco install nsis -y
