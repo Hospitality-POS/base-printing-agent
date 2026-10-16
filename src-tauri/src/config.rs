@@ -109,7 +109,22 @@ pub fn load_config(app_handle: &tauri::AppHandle) -> Option<Config> {
         return None;
     }
     let content = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let mut cfg: Config = serde_json::from_str(&content).ok()?;
+    dedupe_agents(&mut cfg);
+    Some(cfg)
+}
+
+/// Keep only the last entry for each agent_id (the most recently written one).
+fn dedupe_agents(cfg: &mut Config) {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept: Vec<AgentConfig> = Vec::with_capacity(cfg.agents.len());
+    for agent in cfg.agents.drain(..).rev() {
+        if seen.insert(agent.agent_id.clone()) {
+            kept.push(agent);
+        }
+    }
+    kept.reverse();
+    cfg.agents = kept;
 }
 
 pub fn save_config(app_handle: &tauri::AppHandle, config: &Config) -> Result<(), String> {
@@ -132,9 +147,14 @@ pub fn delete_config(app_handle: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Insert the agent, or replace the existing entry with the same agent_id
+/// (never creates duplicates).
 pub fn add_agent(app_handle: &tauri::AppHandle, agent: AgentConfig) -> Result<(), String> {
     let mut config = load_config(app_handle).unwrap_or_default();
-    config.agents.push(agent);
+    match config.agents.iter_mut().find(|a| a.agent_id == agent.agent_id) {
+        Some(existing) => *existing = agent,
+        None => config.agents.push(agent),
+    }
     save_config(app_handle, &config)
 }
 

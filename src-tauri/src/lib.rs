@@ -12,6 +12,9 @@ pub struct AppState {
     pub agent_connections: AsyncMutex<std::collections::HashMap<String, AgentConnection>>,
     pub last_job_id: Mutex<Option<String>>,
     pub last_job_time: Mutex<Option<String>>,
+    /// Background WS/polling tasks per agent, so they can be stopped when an
+    /// agent is removed or reconfigured (and never duplicated on restart).
+    pub agent_tasks: Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     pub app_handle: tauri::AppHandle,
 }
 
@@ -26,7 +29,19 @@ impl AppState {
             agent_connections: AsyncMutex::new(std::collections::HashMap::new()),
             last_job_id: Mutex::new(None),
             last_job_time: Mutex::new(None),
+            agent_tasks: Mutex::new(std::collections::HashMap::new()),
             app_handle,
+        }
+    }
+
+    /// Abort every background task belonging to `agent_id`.
+    pub fn stop_agent_tasks(&self, agent_id: &str) {
+        if let Ok(mut tasks) = self.agent_tasks.lock() {
+            if let Some(handles) = tasks.remove(agent_id) {
+                for h in handles {
+                    h.abort();
+                }
+            }
         }
     }
 }
@@ -47,6 +62,10 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
     log::info!("After deduplication: {} unique agents", unique_agents.len());
 
     for agent in unique_agents {
+        // Idempotent restart: drop any loops already running for this agent.
+        state.stop_agent_tasks(&agent.agent_id);
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
         let printer_target = match agent.printer_type.as_str() {
             "network" => {
                 if let (Some(host), Some(port)) = (&agent.printer_host, agent.printer_network_port) {
@@ -66,11 +85,11 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
         // Only start WebSocket loop if agent has valid credentials
         if !agent.ws_url.is_empty() && !agent.device_token.is_empty() {
             log::info!("Starting WebSocket loop for agent: {}", agent.agent_id);
-            tokio::spawn(ws_client::run_ws_loop(
+            handles.push(tokio::spawn(ws_client::run_ws_loop(
                 Arc::clone(&state),
                 agent.clone(),
                 printer_target.clone(),
-            ));
+            )));
         } else {
             log::info!(
                 "Agent {} missing WebSocket credentials, skipping WebSocket connection",
@@ -95,19 +114,23 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
                     agent.agent_id,
                     agent.zone
                 );
-                tokio::spawn(ws_client::start_polling_loop(
+                handles.push(tokio::spawn(ws_client::start_polling_loop(
                     Arc::clone(&state),
                     agent.branch_id.clone(),
                     agent.zone.clone(),
                     agent.company_code.clone(),
                     agent.agent_id.clone(),
-                ));
+                )));
             } else {
                 log::warn!(
                     "Agent {} has invalid printer configuration, skipping polling",
                     agent.agent_id
                 );
             }
+        }
+
+        if let Ok(mut tasks) = state.agent_tasks.lock() {
+            tasks.insert(agent.agent_id.clone(), handles);
         }
     }
 }
