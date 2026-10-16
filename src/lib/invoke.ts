@@ -83,11 +83,25 @@ interface Config {
 function loadConfig(): Config {
   try {
     const raw = localStorage.getItem(CONFIG_KEY);
-    if (raw) return JSON.parse(raw) as Config;
+    if (raw) {
+      const cfg = JSON.parse(raw) as Config;
+      // Keep the last entry per agentId so the same agent never shows twice.
+      const byId = new Map<string, AgentConfig>();
+      for (const a of cfg.agents ?? []) byId.set(a.agentId, a);
+      cfg.agents = [...byId.values()];
+      return cfg;
+    }
   } catch {
     // fall through
   }
   return { agents: [] };
+}
+
+/** Insert or replace by agentId — never duplicates. */
+function upsertAgent(cfg: Config, agent: AgentConfig) {
+  const i = cfg.agents.findIndex((a) => a.agentId === agent.agentId);
+  if (i >= 0) cfg.agents[i] = agent;
+  else cfg.agents.push(agent);
 }
 
 function saveConfig(cfg: Config) {
@@ -147,6 +161,27 @@ async function ensureOk(resp: Response, label: string) {
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`${label} failed (${resp.status}): ${text}`);
+  }
+}
+
+/** Deactivate an agent on the API. Returns a warning string on failure, else null. */
+async function unpairOnApi(
+  agentId: string,
+  companyCode: string
+): Promise<string | null> {
+  try {
+    const resp = await apiFetch(
+      `/api/agents/${encodeURIComponent(agentId)}/unpair`,
+      { method: "DELETE" },
+      companyCode
+    );
+    if (resp.ok || resp.status === 404) return null;
+    const text = await resp.text().catch(() => "");
+    return `Removed locally, but the server could not be updated (${resp.status}: ${text})`;
+  } catch (e) {
+    return `Removed locally, but the server could not be updated (${
+      e instanceof Error ? e.message : String(e)
+    })`;
   }
 }
 
@@ -348,6 +383,13 @@ async function webInvoke<T>(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      if (resp.status === 409) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(
+          `${data?.error ?? `An agent is already paired for "${args.zone}"`}. ` +
+            `To print from this computer, choose it under "Existing printers" instead of adding a new one.`
+        );
+      }
       await ensureOk(resp, "Pairing");
       const pair = await resp.json();
       const selectedApi = configuredApiUrl() ?? LIVE_API_URL;
@@ -356,7 +398,7 @@ async function webInvoke<T>(
           ? pair.wsUrl ?? ""
           : `${selectedApi.replace(/^http/, "ws")}/ws/agent`;
 
-      cfg.agents.push({
+      upsertAgent(cfg, {
         agentId: pair.agentId,
         companyId: pair.companyId,
         companyCode: args.companyCode as string,
@@ -410,7 +452,7 @@ async function webInvoke<T>(
         // ignore — defaults are fine
       }
 
-      cfg.agents.push({
+      upsertAgent(cfg, {
         agentId,
         companyId: (args.companyId as string) ?? "",
         companyCode: (args.companyCode as string) ?? "",
@@ -431,32 +473,39 @@ async function webInvoke<T>(
 
     case "connect_to_existing_agent": {
       const cfg = loadConfig();
+      const prev = cfg.agents.find((a) => a.agentId === args.agentId);
+      const pick = (v: unknown, old?: string) =>
+        (typeof v === "string" && v) || old || "";
+      const zone = pick(args.zone, prev?.zone);
+      const passedZones = (args.zones as string[] | undefined) ?? [];
       const agent: AgentConfig = {
+        ...prev,
         agentId: args.agentId as string,
-        companyId: "",
-        companyCode: (args.companyCode as string) ?? "",
-        branchId: "",
-        zone: "",
-        deviceName: "",
-        deviceToken: "",
+        companyId: pick(args.companyId, prev?.companyId),
+        companyCode: (args.companyCode as string) ?? prev?.companyCode ?? "",
+        branchId: pick(args.shopId, prev?.branchId),
+        zone,
+        zones: passedZones.length ? passedZones : prev?.zones?.length ? prev.zones : zone ? [zone] : [],
+        routingMode: pick(args.routingMode, prev?.routingMode) || undefined,
+        deviceName: pick(args.deviceName, prev?.deviceName),
+        deviceToken: prev?.deviceToken ?? "",
         printerPort: (args.printerPort as string) ?? "",
         paperWidth: 80,
-        wsUrl: "",
+        wsUrl: prev?.wsUrl ?? "",
         printerType: (args.printerType as string) ?? "serial",
         printerHost: args.printerHost as string | undefined,
         printerNetworkPort: args.printerNetworkPort as number | undefined,
       };
-      cfg.agents.push(agent);
-      saveConfig(cfg);
 
+      // Sync printer settings first; never send blank routing to the server.
       const resp = await apiFetch(
         `/api/agents/${encodeURIComponent(agent.agentId)}/update`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            branch_id: agent.branchId,
-            zone: agent.zone,
+            ...(agent.branchId && { branch_id: agent.branchId }),
+            ...(agent.zone && { zone: agent.zone }),
             printer_type: agent.printerType,
             printer_port: agent.printerPort,
             printer_host: agent.printerHost,
@@ -466,10 +515,15 @@ async function webInvoke<T>(
         agent.companyCode
       );
       await ensureOk(resp, "Sync agent to API");
+
+      upsertAgent(cfg, agent);
+      saveConfig(cfg);
       return undefined as T;
     }
 
     case "update_agent_printer_port": {
+      const deviceName = ((args.deviceName as string | undefined) ?? "").trim();
+      const zone = ((args.zone as string | undefined) ?? "").trim();
       const resp = await apiFetch(
         `/api/agents/${encodeURIComponent(args.agentId as string)}/update`,
         {
@@ -480,6 +534,8 @@ async function webInvoke<T>(
             printer_type: args.printerType,
             printer_host: args.printerHost,
             printer_network_port: args.printerNetworkPort,
+            ...(deviceName && { device_name: deviceName }),
+            ...(zone && { zone, zones: [zone] }),
           }),
         },
         args.companyCode as string
@@ -489,6 +545,11 @@ async function webInvoke<T>(
       const cfg = loadConfig();
       const agent = cfg.agents.find((a) => a.agentId === args.agentId);
       if (agent) {
+        if (deviceName) agent.deviceName = deviceName;
+        if (zone) {
+          agent.zone = zone;
+          agent.zones = [zone];
+        }
         agent.printerPort = (args.printerPort as string) ?? "";
         agent.printerType = (args.printerType as string) ?? agent.printerType;
         agent.printerHost = args.printerHost as string | undefined;
@@ -502,17 +563,28 @@ async function webInvoke<T>(
 
     case "unpair_device": {
       const cfg = loadConfig();
+      const target = cfg.agents.find((a) => a.agentId === args.agentId);
+      const warning = await unpairOnApi(
+        args.agentId as string,
+        target?.companyCode ?? ""
+      );
       cfg.agents = cfg.agents.filter((a) => a.agentId !== args.agentId);
       saveConfig(cfg);
-      return undefined as T;
+      return warning as T;
     }
 
     case "unpair_all_agents": {
       const cfg = loadConfig();
       const count = cfg.agents.length;
+      let failures = 0;
+      for (const a of cfg.agents) {
+        if (await unpairOnApi(a.agentId, a.companyCode)) failures++;
+      }
       cfg.agents = [];
       saveConfig(cfg);
-      return `Unpaired ${count} agent(s)` as T;
+      return (failures > 0
+        ? `Unpaired ${count} agent(s) locally; ${failures} could not be removed on the server`
+        : `Unpaired ${count} agent(s)`) as T;
     }
 
     case "remove_duplicate_agents": {

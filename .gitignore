@@ -15,3 +15,9 @@ Thumbs.db
 # Installer build artifacts (built by CI release workflow)
 installer/*.exe
 installer/web/
+installer/*.zip
+installer/portable/
+
+# Local Claude Code preview config
+.claude/
+installer/print-agent-helper.json

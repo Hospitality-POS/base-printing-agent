@@ -1,30 +1,19 @@
-import React, { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "../lib/invoke";
 import { useAgentStatus } from "../hooks/useAgentStatus";
+import PrinterPicker, {
+  PrinterType,
+  PrinterValue,
+  describePrinter,
+  printerArgs,
+  printerIsReady,
+} from "../components/PrinterPicker";
+import { Alert, Badge, Button, Field, Icon, Modal, Spinner, errorMessage, useToast } from "../components/ui";
 
-interface Config {
-  agents: Array<{
-    agentId: string;
-    zone: string;
-    deviceName: string;
-    branchId: string;
-    companyCode: string;
-    printerType: string;
-    printerPort?: string;
-    printerHost?: string;
-    printerNetworkPort?: number;
-  }>;
-}
-
-interface Props {
-  config: Config;
-  shopId: string;
-  onShowSetup: () => void;
-}
-
-interface Agent {
+interface LocalAgent {
   agentId: string;
   zone: string;
+  zones?: string[];
   deviceName: string;
   branchId: string;
   companyCode: string;
@@ -32,616 +21,398 @@ interface Agent {
   printerPort?: string;
   printerHost?: string;
   printerNetworkPort?: number;
+  routingMode?: string;
+  wsUrl?: string;
+  deviceToken?: string;
 }
 
-export default function StatusScreen({ config, shopId, onShowSetup }: Props) {
-  const { statuses, loading } = useAgentStatus();
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [unpairConfirm, setUnpairConfirm] = useState<{ agentId: string | null }>({ agentId: null });
-  const [unpairAllConfirm, setUnpairAllConfirm] = useState(false);
-  const [testPrinting, setTestPrinting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
-  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
-  const [testingConnection, setTestingConnection] = useState(false);
-  const [windowsPrinters, setWindowsPrinters] = useState<string[]>([]);
-  const [loadingWindowsPrinters, setLoadingWindowsPrinters] = useState(false);
-  const [printerConfig, setPrinterConfig] = useState<{
-    printerPort: string;
-    printerType: string;
-    printerHost: string;
-    printerNetworkPort: string;
-  }>({
-    printerPort: "",
-    printerType: "serial",
-    printerHost: "",
-    printerNetworkPort: "9100",
-  });
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [configResult, setConfigResult] = useState<{ ok: boolean; msg: string } | null>(null);
+interface Props {
+  onAddPrinter: () => void;
+  /** Called after the last printer is removed. */
+  onEmpty: () => void;
+}
+
+const toPrinterValue = (a: LocalAgent): PrinterValue => ({
+  type: (["serial", "network", "windows"].includes(a.printerType) ? a.printerType : "windows") as PrinterType,
+  port: a.printerPort ?? "",
+  host: a.printerHost ?? "",
+  networkPort: String(a.printerNetworkPort ?? 9100),
+});
+
+const zonesOf = (a: LocalAgent) => (a.zones?.length ? a.zones : a.zone ? [a.zone] : []);
+
+export default function StatusScreen({ onAddPrinter, onEmpty }: Props) {
+  const toast = useToast();
+  const { statuses } = useAgentStatus();
+  const [agents, setAgents] = useState<LocalAgent[] | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
   const [autostart, setAutostart] = useState<boolean | null>(null);
 
-  React.useEffect(() => {
-    invoke<boolean>("get_autostart")
-      .then(setAutostart)
-      .catch(() => setAutostart(null));
-  }, []);
+  // Edit modal
+  const [editing, setEditing] = useState<LocalAgent | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editZone, setEditZone] = useState("");
+  const [editPrinter, setEditPrinter] = useState<PrinterValue | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
-  const toggleAutostart = async (enabled: boolean) => {
-    setAutostart(enabled);
+  // Remove modals
+  const [removing, setRemoving] = useState<LocalAgent | null>(null);
+  const [removeAll, setRemoveAll] = useState(false);
+  const [removeBusy, setRemoveBusy] = useState(false);
+
+  // This computer's printers come from the local config (one entry per agent).
+  const loadAgents = useCallback(async () => {
     try {
-      await invoke("set_autostart", { enabled });
+      const cfg = await invoke<{ agents: LocalAgent[] }>("get_config");
+      const list = cfg?.agents ?? [];
+      setAgents(list);
+      if (list.length === 0) onEmpty();
     } catch (e) {
-      setAutostart(!enabled);
-      setConfigResult({ ok: false, msg: `Failed to update autostart: ${e}` });
+      setAgents([]);
+      toast("error", `Couldn't read printer settings: ${errorMessage(e)}`);
     }
-  };
+  }, [onEmpty, toast]);
 
-  const mapAgent = (a: any): Agent => ({
-    agentId: a.agent_id,
-    zone: a.zone,
-    deviceName: a.device_name,
-    branchId: a.shop_id,
-    companyCode: a.company_code,
-    printerType: a.printer_type || "serial",
-    printerPort: a.printer_port,
-    printerHost: a.printer_host,
-    printerNetworkPort: a.printer_network_port,
-  });
+  useEffect(() => {
+    loadAgents();
+    invoke<boolean>("get_autostart").then(setAutostart).catch(() => setAutostart(null));
+  }, [loadAgents]);
 
-  const fetchAgents = async (overrideShopId?: string) => {
+  const toggleAutostart = async () => {
+    const next = !autostart;
+    setAutostart(next);
     try {
-      const shopIdToUse = overrideShopId || shopId || config.agents[0]?.branchId || "";
-      const companyCode = config.agents[0]?.companyCode || "";
-      const fetched = await invoke<any[]>("fetch_agents_from_api", {
-        shopId: shopIdToUse,
-        companyCode,
-      });
-      setAgents(fetched.map(mapAgent));
+      await invoke("set_autostart", { enabled: next });
     } catch (e) {
-      console.error("Failed to fetch agents from API:", e);
-      setAgents(config.agents);
+      setAutostart(!next);
+      toast("error", `Couldn't change startup setting: ${errorMessage(e)}`);
     }
   };
 
-  React.useEffect(() => {
-    fetchAgents();
-  }, [config.agents]);
-
-  const loadWindowsPrinters = async () => {
-    setLoadingWindowsPrinters(true);
+  const testPrint = async (a: LocalAgent) => {
+    setTesting(a.agentId);
     try {
-      const printers = await invoke<string[]>("list_windows_printers");
-      setWindowsPrinters(printers);
-      if (printers.length === 0) {
-        setConfigResult({ ok: false, msg: "No Windows printers found. Make sure your printer driver is installed." });
-      }
+      await invoke("test_print", printerArgs(toPrinterValue(a)));
+      toast("success", `Test page sent to ${a.deviceName}.`);
     } catch (e) {
-      setWindowsPrinters([]);
-      setConfigResult({ ok: false, msg: "Failed to load Windows printers: " + String(e) });
+      toast("error", `Test print failed: ${errorMessage(e)}`);
     } finally {
-      setLoadingWindowsPrinters(false);
+      setTesting(null);
     }
   };
 
-  const handleTestPrint = async (agentId: string) => {
-    setTestPrinting(true);
-    setTestResult(null);
+  const openEdit = (a: LocalAgent) => {
+    setEditing(a);
+    setEditName(a.deviceName);
+    setEditZone(a.zone);
+    setEditPrinter(toPrinterValue(a));
+    setEditError(null);
+  };
+
+  const closeEdit = () => {
+    if (saving) return;
+    setEditing(null);
+    setEditPrinter(null);
+  };
+
+  const saveEdit = async () => {
+    if (!editing || !editPrinter) return;
+    setEditError(null);
+    if (!editName.trim()) return setEditError("Give this printer a name.");
+    if (!printerIsReady(editPrinter)) return setEditError("Choose a printer.");
+    const duplicate = (agents ?? []).find(
+      (a) => a.agentId !== editing.agentId && a.deviceName.trim().toLowerCase() === editName.trim().toLowerCase()
+    );
+    if (duplicate) return setEditError(`Another printer on this computer is already called “${duplicate.deviceName}”.`);
+
+    setSaving(true);
     try {
-      await invoke("test_print", { agentId });
-      setTestResult({ ok: true, msg: "Test print sent!" });
-    } catch (e: unknown) {
-      setTestResult({ ok: false, msg: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setTestPrinting(false);
-      setTimeout(() => setTestResult(null), 4000);
-    }
-  };
-
-  const handleTestConnection = async (agent: Agent) => {
-    if (agent.printerType !== "network" || !agent.printerHost) {
-      alert("Connection test only works for network printers with configured IP");
-      return;
-    }
-    setTestingConnection(true);
-    try {
-      const result = await invoke<string>("test_printer_connection", {
-        printerHost: agent.printerHost,
-        printerNetworkPort: agent.printerNetworkPort || 9100,
-      });
-      alert(result);
-    } catch (e: unknown) {
-      alert("Connection failed: " + (e instanceof Error ? e.message : String(e)));
-    } finally {
-      setTestingConnection(false);
-    }
-  };
-
-  const handleEditPrinter = (agent: Agent) => {
-    setEditingAgentId(agent.agentId);
-    setWindowsPrinters([]);
-    setPrinterConfig({
-      printerPort: agent.printerPort || "",
-      printerType: agent.printerType || "serial",
-      printerHost: agent.printerHost || "",
-      printerNetworkPort: agent.printerNetworkPort?.toString() || "9100",
-    });
-    setConfigResult(null);
-    // Auto-load Windows printers if agent is already configured as windows type
-    if (agent.printerType === "windows") {
-      loadWindowsPrinters();
-    }
-  };
-
-  const handleSavePrinter = async () => {
-    setSavingConfig(true);
-    setConfigResult(null);
-    try {
-      const agent = agents.find(a => a.agentId === editingAgentId);
       await invoke("update_agent_printer_port", {
-        agentId: editingAgentId,
-        printerPort: printerConfig.printerPort,
-        printerType: printerConfig.printerType,
-        printerHost: printerConfig.printerType === "network" ? printerConfig.printerHost : null,
-        printerNetworkPort: printerConfig.printerType === "network"
-          ? parseInt(printerConfig.printerNetworkPort)
-          : null,
-        companyCode: agent?.companyCode || "",
+        agentId: editing.agentId,
+        companyCode: editing.companyCode,
+        ...printerArgs(editPrinter),
+        deviceName: editName.trim() !== editing.deviceName ? editName.trim() : null,
+        zone: editZone.trim() && editZone.trim() !== editing.zone ? editZone.trim() : null,
       });
-      setConfigResult({ ok: true, msg: "Printer configuration saved!" });
-      setEditingAgentId(null);
-      await fetchAgents(agent?.branchId);
-    } catch (e: unknown) {
-      setConfigResult({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+      toast("success", `${editName.trim()} saved and synced to the server.`);
+      setEditing(null);
+      setEditPrinter(null);
+      await loadAgents();
+    } catch (e) {
+      setEditError(errorMessage(e));
     } finally {
-      setSavingConfig(false);
-      setTimeout(() => setConfigResult(null), 4000);
+      setSaving(false);
     }
   };
 
-  const confirmUnpair = async () => {
-    const agentId = unpairConfirm.agentId;
-    if (!agentId) return;
+  const confirmRemove = async () => {
+    if (!removing) return;
+    setRemoveBusy(true);
     try {
-      await invoke("unpair_device", { agentId });
-      await fetchAgents();
-      setUnpairConfirm({ agentId: null });
-    } catch (e: unknown) {
-      console.error("Failed to unpair:", e);
+      const warning = await invoke<string | null>("unpair_device", { agentId: removing.agentId });
+      if (warning) toast("warning", warning);
+      else toast("success", `${removing.deviceName} removed.`);
+      setRemoving(null);
+      await loadAgents();
+    } catch (e) {
+      toast("error", `Couldn't remove printer: ${errorMessage(e)}`);
+    } finally {
+      setRemoveBusy(false);
     }
   };
 
-  const confirmUnpairAll = async () => {
+  const confirmRemoveAll = async () => {
+    setRemoveBusy(true);
     try {
       const result = await invoke<string>("unpair_all_agents");
-      alert(result);
-      setAgents([]);
-      setUnpairAllConfirm(false);
-    } catch (e: unknown) {
-      alert("Failed to unpair all agents: " + (e instanceof Error ? e.message : String(e)));
+      toast(result.includes("could not") ? "warning" : "success", result);
+      setRemoveAll(false);
+      await loadAgents();
+    } catch (e) {
+      toast("error", `Couldn't remove printers: ${errorMessage(e)}`);
+    } finally {
+      setRemoveBusy(false);
     }
   };
 
-  const hasValidPrinter = (agent: Agent) => {
-    if (agent.printerType === "network") return !!(agent.printerHost && agent.printerNetworkPort);
-    if (agent.printerType === "windows") return !!(agent.printerPort);
-    return !!(agent.printerPort);
+  const connection = (a: LocalAgent) => {
+    const live = statuses.find((s) => s.agentId === a.agentId)?.wsConnected ?? false;
+    if (live) return { tone: "green" as const, label: "Live" };
+    if (!a.wsUrl || !a.deviceToken) return { tone: "blue" as const, label: "Polling" };
+    return { tone: "amber" as const, label: "Reconnecting" };
   };
 
+  const liveCount = (agents ?? []).filter((a) => connection(a).tone === "green").length;
+
   return (
-    <div className="min-h-screen bg-gray-950 p-4 flex flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-green-500/20 rounded-xl flex items-center justify-center">
-            <svg className="w-5 h-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          <div>
-            <h1 className="text-white font-semibold">PrintAgent</h1>
-            <p className="text-gray-400 text-sm">Connected Agents</p>
+    <div className="h-screen flex flex-col bg-gray-950 text-gray-100">
+      {/* ── Header ── */}
+      <header className="flex items-center justify-between gap-4 px-8 py-5 border-b border-gray-800">
+        <div className="flex items-center gap-4 min-w-0">
+          <img src="/logo.png" alt="Base" className="h-8 w-auto" />
+          <div className="h-8 w-px bg-gray-800" />
+          <div className="min-w-0">
+            <h1 className="text-base font-semibold text-white">Printers on this computer</h1>
+            <p className="text-xs text-gray-400">
+              {agents === null
+                ? "Loading…"
+                : `${agents.length} printer${agents.length === 1 ? "" : "s"} · ${liveCount} live`}
+            </p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setUnpairAllConfirm(true)}
-            className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-medium transition-colors"
-          >
-            Unpair All
-          </button>
-          <button
-            onClick={onShowSetup}
-            className="px-4 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg text-sm font-medium transition-colors"
-          >
-            + Add Agent
-          </button>
-        </div>
-      </div>
+        <Button variant="primary" icon="plus" onClick={onAddPrinter}>
+          Add printer
+        </Button>
+      </header>
 
-      {/* Agents List */}
-      <div className="flex-1 space-y-3">
-        {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <div className="w-6 h-6 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+      {/* ── Printer grid ── */}
+      <main className="flex-1 overflow-y-auto px-8 py-6">
+        {agents === null ? (
+          <div className="flex items-center justify-center gap-2 py-16 text-sm text-gray-500">
+            <Spinner /> Loading printers…
           </div>
-        ) : agents.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">No agents connected</div>
         ) : (
-          agents.map((agent) => {
-            const status = statuses.find(s => s.agentId === agent.agentId);
-            const wsConnected = status?.wsConnected ?? false;
-            const queueCount = status?.queueCount ?? 0;
-            const isPolling = !wsConnected && agent.branchId && agent.zone;
-            const connected = wsConnected || isPolling;
-            const validPrinter = hasValidPrinter(agent);
-
-            return (
-              <div key={agent.agentId} className="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
-                {/* Agent Header Row */}
-                <div
-                  className="p-4 cursor-pointer hover:bg-gray-800/50 transition-colors"
-                  onClick={() => setExpandedAgentId(expandedAgentId === agent.agentId ? null : agent.agentId)}
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <h3 className="text-white font-medium">{agent.deviceName}</h3>
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          connected ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"
-                        }`}>
-                          {isPolling ? "Polling" : wsConnected ? "Connected" : "Disconnected"}
-                        </span>
-                        {!validPrinter && (
-                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400">
-                            Configure Printer
-                          </span>
-                        )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {agents.map((a) => {
+              const conn = connection(a);
+              const ready = printerIsReady(toPrinterValue(a));
+              const zones = zonesOf(a);
+              return (
+                <article key={a.agentId} className="rounded-2xl border border-gray-800 bg-gray-900 flex flex-col">
+                  <div className="p-5 flex-1">
+                    <div className="flex items-start gap-3">
+                      <span className="w-10 h-10 shrink-0 rounded-xl bg-gray-800 text-gray-300 flex items-center justify-center">
+                        <Icon name={a.printerType === "network" ? "wifi" : a.printerType === "serial" ? "usb" : "printer"} className="w-5 h-5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h2 className="text-sm font-semibold text-white truncate">{a.deviceName || "Unnamed printer"}</h2>
+                          <Badge tone={conn.tone} dot>
+                            {conn.label}
+                          </Badge>
+                        </div>
+                        <p className={`text-xs mt-0.5 truncate ${ready ? "text-gray-400" : "text-amber-300"}`}>
+                          {ready ? describePrinter(toPrinterValue(a)) : "No printer selected"}
+                        </p>
                       </div>
-                      <p className="text-gray-400 text-sm">{agent.zone} • {agent.agentId.slice(0, 8)}...</p>
                     </div>
-                    <svg
-                      className={`w-4 h-4 text-gray-500 transition-transform ${expandedAgentId === agent.agentId ? "rotate-180" : ""}`}
-                      fill="none" viewBox="0 0 24 24" stroke="currentColor"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-gray-400 text-sm">
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                    </svg>
-                    Queue: {queueCount}
-                  </div>
-                </div>
 
-                {/* Expanded Panel */}
-                {expandedAgentId === agent.agentId && (
-                  <div className="p-4 pt-0 border-t border-gray-800">
+                    <div className="flex flex-wrap gap-1.5 mt-4">
+                      <Badge tone={a.routingMode === "location" ? "purple" : "gray"}>
+                        {a.routingMode === "location" ? "Location" : "Category"}
+                      </Badge>
+                      {zones.slice(0, 5).map((z) => (
+                        <Badge key={z}>{z}</Badge>
+                      ))}
+                      {zones.length > 5 && <Badge>+{zones.length - 5}</Badge>}
+                    </div>
 
-                    {/* Edit Form */}
-                    {editingAgentId === agent.agentId ? (
-                      <div className="space-y-3 mb-3">
-
-                        {/* Printer Type */}
-                        <div>
-                          <label className="text-gray-500 text-xs mb-1 block">Printer Type</label>
-                          <select
-                            value={printerConfig.printerType}
-                            onChange={(e) => {
-                              const t = e.target.value;
-                              setPrinterConfig({ ...printerConfig, printerType: t, printerPort: "" });
-                              setWindowsPrinters([]);
-                              if (t === "windows") loadWindowsPrinters();
-                            }}
-                            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                          >
-                            <option value="serial">Serial / USB (COM port)</option>
-                            <option value="network">Network (TCP/IP)</option>
-                            <option value="windows">Windows Printer</option>
-                          </select>
-                        </div>
-
-                        {/* Serial */}
-                        {printerConfig.printerType === "serial" && (
-                          <div>
-                            <label className="text-gray-500 text-xs mb-1 block">Printer Port</label>
-                            <input
-                              type="text"
-                              value={printerConfig.printerPort}
-                              onChange={(e) => setPrinterConfig({ ...printerConfig, printerPort: e.target.value })}
-                              placeholder="e.g. COM3 or /dev/ttyUSB0"
-                              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                            />
-                          </div>
-                        )}
-
-                        {/* Network */}
-                        {printerConfig.printerType === "network" && (
-                          <>
-                            <div>
-                              <label className="text-gray-500 text-xs mb-1 block">Printer Host / IP</label>
-                              <input
-                                type="text"
-                                value={printerConfig.printerHost}
-                                onChange={(e) => setPrinterConfig({ ...printerConfig, printerHost: e.target.value })}
-                                placeholder="192.168.1.100"
-                                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-gray-500 text-xs mb-1 block">TCP Port</label>
-                              <input
-                                type="text"
-                                value={printerConfig.printerNetworkPort}
-                                onChange={(e) => setPrinterConfig({ ...printerConfig, printerNetworkPort: e.target.value })}
-                                placeholder="9100"
-                                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                              />
-                            </div>
-                          </>
-                        )}
-
-                        {/* Windows Printer */}
-                        {printerConfig.printerType === "windows" && (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <label className="text-gray-500 text-xs">Windows Printer Name</label>
-                              <button
-                                onClick={loadWindowsPrinters}
-                                disabled={loadingWindowsPrinters}
-                                className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
-                              >
-                                {loadingWindowsPrinters ? "Loading..." : "↻ Refresh"}
-                              </button>
-                            </div>
-
-                            {windowsPrinters.length > 0 ? (
-                              <div className="space-y-1 mb-2">
-                                {windowsPrinters.map((name) => (
-                                  <div key={name} className="flex gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => setPrinterConfig({ ...printerConfig, printerPort: name })}
-                                      className={`flex-1 px-3 py-2 text-left text-sm rounded-lg border transition-colors ${
-                                        printerConfig.printerPort === name
-                                          ? "bg-green-600/20 border-green-500 text-green-400"
-                                          : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
-                                      }`}
-                                    >
-                                      {name}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        try {
-                                          await invoke("test_print", {
-                                            printerType: "windows",
-                                            printerPort: name,
-                                          });
-                                          setConfigResult({ ok: true, msg: `Test print sent to ${name}` });
-                                        } catch (e: unknown) {
-                                          setConfigResult({ ok: false, msg: e instanceof Error ? e.message : String(e) });
-                                        }
-                                      }}
-                                      className="px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
-                                    >
-                                      Test
-                                    </button>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="text-xs text-gray-500 mb-2">
-                                {loadingWindowsPrinters ? "Loading..." : "Click Refresh to load installed Windows printers"}
-                              </p>
-                            )}
-
-                            {/* Manual entry fallback */}
-                            <input
-                              type="text"
-                              value={printerConfig.printerPort}
-                              onChange={(e) => setPrinterConfig({ ...printerConfig, printerPort: e.target.value })}
-                              placeholder="Or type printer name manually"
-                              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                            />
-                            <p className="text-xs text-gray-500 mt-1">
-                              Must match exactly the name in Windows → Printers & Scanners
-                            </p>
-                          </div>
-                        )}
-
-                        {/* Save / Cancel */}
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={handleSavePrinter}
-                            disabled={savingConfig}
-                            className="flex-1 px-3 py-1.5 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                          >
-                            {savingConfig ? "Saving..." : "Save to API"}
-                          </button>
-                          <button
-                            onClick={() => { setEditingAgentId(null); setWindowsPrinters([]); }}
-                            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-
-                        {configResult && (
-                          <div className={`p-2 rounded-lg text-xs ${
-                            configResult.ok ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
-                          }`}>
-                            {configResult.msg}
-                          </div>
-                        )}
+                    {!ready && (
+                      <div className="mt-4">
+                        <Alert tone="warning">Choose which printer this should print to.</Alert>
                       </div>
-
-                    ) : (
-                      /* Info View */
-                      <>
-                        <div className="grid grid-cols-2 gap-3 mb-3">
-                          <div className="bg-gray-800/50 rounded-lg p-3">
-                            <p className="text-gray-500 text-xs mb-1">Branch ID</p>
-                            <p className="text-white text-sm truncate">{agent.branchId}</p>
-                          </div>
-                          <div className="bg-gray-800/50 rounded-lg p-3">
-                            <p className="text-gray-500 text-xs mb-1">Zone</p>
-                            <p className="text-white text-sm">{agent.zone}</p>
-                          </div>
-                          <div className="bg-gray-800/50 rounded-lg p-3">
-                            <p className="text-gray-500 text-xs mb-1">Printer Type</p>
-                            <p className="text-white text-sm capitalize">{agent.printerType}</p>
-                          </div>
-                          <div className="bg-gray-800/50 rounded-lg p-3">
-                            <p className="text-gray-500 text-xs mb-1">
-                              {agent.printerType === "network" ? "Printer IP" : "Printer Port / Name"}
-                            </p>
-                            <p className="text-white text-sm truncate">
-                              {agent.printerType === "network"
-                                ? agent.printerHost || "Not configured"
-                                : agent.printerPort || "Not configured"}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between flex-wrap gap-2">
-                          <button
-                            onClick={() => setUnpairConfirm({ agentId: agent.agentId })}
-                            className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm font-medium transition-colors"
-                          >
-                            Remove Agent
-                          </button>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {agent.printerType === "network" && agent.printerHost && (
-                              <button
-                                onClick={() => handleTestConnection(agent)}
-                                disabled={testingConnection}
-                                className="px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                              >
-                                {testingConnection ? "Testing..." : "Test Connection"}
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleEditPrinter(agent)}
-                              className="px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg text-sm font-medium transition-colors"
-                            >
-                              Configure Printer
-                            </button>
-                            <button
-                              onClick={() => handleTestPrint(agent.agentId)}
-                              disabled={testPrinting}
-                              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors disabled:opacity-50"
-                            >
-                              Test Print
-                            </button>
-                          </div>
-                        </div>
-                      </>
                     )}
                   </div>
-                )}
-              </div>
-            );
-          })
+
+                  <div className="flex items-center gap-2 px-5 py-3 border-t border-gray-800">
+                    <Button size="sm" icon="printer" loading={testing === a.agentId} disabled={!ready} onClick={() => testPrint(a)}>
+                      Test print
+                    </Button>
+                    <Button size="sm" icon="edit" onClick={() => openEdit(a)}>
+                      {ready ? "Edit" : "Set printer"}
+                    </Button>
+                    <span className="flex-1" />
+                    <Button size="sm" variant="ghost" icon="trash" onClick={() => setRemoving(a)} className="hover:text-red-400">
+                      Remove
+                    </Button>
+                  </div>
+                </article>
+              );
+            })}
+
+            <button
+              type="button"
+              onClick={onAddPrinter}
+              className="rounded-2xl border border-dashed border-gray-800 hover:border-green-500/40 hover:bg-green-500/[0.03] min-h-[180px] flex flex-col items-center justify-center gap-2 text-gray-500 hover:text-green-400 transition-colors"
+            >
+              <Icon name="plus" className="w-6 h-6" />
+              <span className="text-sm font-medium">Add another printer</span>
+            </button>
+          </div>
         )}
-      </div>
+      </main>
 
-      {/* Test Result Alert */}
-      {testResult && (
-        <div className={`flex items-center gap-2 p-3 rounded-xl text-sm mb-4 border ${
-          testResult.ok
-            ? "bg-green-500/10 border-green-500/20 text-green-400"
-            : "bg-red-500/10 border-red-500/20 text-red-400"
-        }`}>
-          {testResult.ok ? (
-            <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-          ) : (
-            <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          )}
-          {testResult.msg}
-        </div>
-      )}
-
-      {/* Unpair Single Confirmation Modal */}
-      {unpairConfirm.agentId && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-sm w-full mx-4">
-            <h3 className="text-lg font-semibold text-white mb-2">Remove Agent</h3>
-            <p className="text-gray-400 text-sm mb-6">
-              Are you sure you want to remove this agent? This will disconnect the printer from this device.
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setUnpairConfirm({ agentId: null })}
-                className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmUnpair}
-                className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm font-medium transition-colors"
-              >
-                Remove
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Unpair All Confirmation Modal */}
-      {unpairAllConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-sm w-full mx-4">
-            <h3 className="text-lg font-semibold text-white mb-2">Remove All Agents</h3>
-            <p className="text-gray-400 text-sm mb-6">
-              Are you sure you want to remove all agents? This will clear all local configurations and disconnect all printers.
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setUnpairAllConfirm(false)}
-                className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 text-sm font-medium transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmUnpairAll}
-                className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm font-medium transition-colors"
-              >
-                Remove All
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Run options */}
-      {autostart !== null && (
-        <div className="mt-4 bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center justify-between">
-          <div>
-            <p className="text-white text-sm font-medium">Run at Windows startup</p>
-            <p className="text-gray-500 text-xs">Start PrintAgent automatically when you sign in</p>
-          </div>
-          <button
-            role="switch"
-            aria-checked={autostart}
-            onClick={() => toggleAutostart(!autostart)}
-            className={`relative w-11 h-6 rounded-full transition-colors ${autostart ? "bg-green-600" : "bg-gray-700"}`}
-          >
-            <span
-              className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${autostart ? "translate-x-5" : ""}`}
-            />
+      {/* ── Footer settings ── */}
+      <footer className="flex items-center justify-between gap-4 px-8 py-3.5 border-t border-gray-800 bg-gray-900/40">
+        {autostart !== null ? (
+          <button type="button" onClick={toggleAutostart} className="flex items-center gap-3 text-left" role="switch" aria-checked={autostart}>
+            <span className={`relative w-9 h-5 rounded-full transition-colors ${autostart ? "bg-green-600" : "bg-gray-700"}`}>
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${autostart ? "translate-x-4" : ""}`} />
+            </span>
+            <span>
+              <span className="block text-sm text-gray-200">Start with Windows</span>
+              <span className="block text-xs text-gray-500">Keep printing after a restart</span>
+            </span>
           </button>
-        </div>
-      )}
+        ) : (
+          <span className="text-[11px] text-gray-600">A product of Basepoint Cloud Inc</span>
+        )}
+        {(agents?.length ?? 0) > 1 && (
+          <Button size="sm" variant="ghost" icon="trash" onClick={() => setRemoveAll(true)} className="hover:text-red-400">
+            Remove all
+          </Button>
+        )}
+      </footer>
 
-      <p className="text-center text-gray-600 text-xs mt-4">
-        A product of Basepoint Cloud Inc
-      </p>
+      {/* ── Edit modal ── */}
+      <Modal
+        open={!!editing}
+        size="xl"
+        title={`Edit ${editing?.deviceName || "printer"}`}
+        subtitle="Changes are saved to the server and take effect immediately."
+        onClose={closeEdit}
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeEdit} disabled={saving}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={saving} onClick={saveEdit}>
+              Save changes
+            </Button>
+          </>
+        }
+      >
+        {editing && editPrinter && (
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,0.7fr),minmax(0,1.3fr)] gap-8">
+            <section className="space-y-5">
+              <h3 className="text-sm font-medium text-gray-300">Details</h3>
+              <Field label="Printer name" required>
+                <input className="input-field" value={editName} onChange={(e) => setEditName(e.target.value)} />
+              </Field>
+              <Field
+                label={editing.routingMode === "location" ? "Location" : "Category / zone"}
+                hint={
+                  zonesOf(editing).length > 1
+                    ? "This printer serves several targets — changing this replaces them with one."
+                    : "Must match the name the POS uses when it sends jobs."
+                }
+              >
+                <input className="input-field" value={editZone} onChange={(e) => setEditZone(e.target.value)} />
+              </Field>
+              <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4 space-y-2 text-xs">
+                <div className="flex justify-between gap-3">
+                  <span className="text-gray-500">Agent ID</span>
+                  <span className="text-gray-300 font-mono truncate">{editing.agentId}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-gray-500">Branch</span>
+                  <span className="text-gray-300 font-mono truncate">{editing.branchId || "—"}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-gray-500">Company</span>
+                  <span className="text-gray-300 truncate">{editing.companyCode}</span>
+                </div>
+              </div>
+              {editError && (
+                <Alert tone="error" onClose={() => setEditError(null)}>
+                  {editError}
+                </Alert>
+              )}
+            </section>
+            <section>
+              <h3 className="text-sm font-medium text-gray-300 mb-3">Printer</h3>
+              <PrinterPicker value={editPrinter} onChange={setEditPrinter} />
+            </section>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Remove one ── */}
+      <Modal
+        open={!!removing}
+        size="sm"
+        title={`Remove ${removing?.deviceName ?? "printer"}?`}
+        onClose={() => !removeBusy && setRemoving(null)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setRemoving(null)} disabled={removeBusy}>
+              Cancel
+            </Button>
+            <Button variant="danger" icon="trash" loading={removeBusy} onClick={confirmRemove}>
+              Remove printer
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-gray-400">
+          This stops printing on this computer and removes the printer from the POS. Jobs for{" "}
+          <span className="text-gray-200">{removing ? zonesOf(removing).join(", ") : ""}</span> won't print until another
+          printer is set up for them.
+        </p>
+      </Modal>
+
+      {/* ── Remove all ── */}
+      <Modal
+        open={removeAll}
+        size="sm"
+        title="Remove all printers?"
+        onClose={() => !removeBusy && setRemoveAll(false)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setRemoveAll(false)} disabled={removeBusy}>
+              Cancel
+            </Button>
+            <Button variant="danger" icon="trash" loading={removeBusy} onClick={confirmRemoveAll}>
+              Remove all
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-gray-400">
+          All {agents?.length ?? 0} printers on this computer will stop printing and be removed from the POS.
+        </p>
+      </Modal>
     </div>
   );
 }

@@ -45,7 +45,7 @@ jobs:
                 repo: context.repo.repo,
                 tag_name: tag,
                 name: `PrintAgent ${tag}`,
-                body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows 10/11 (desktop app) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows 10/11 (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| Windows 7/8/8.1+ 64-bit (browser + helper) | \`PrintAgentHelper-Setup-x64.exe\` |\n| Windows 7/8 32-bit (browser + helper) | \`PrintAgentHelper-Setup-x86.exe\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select branch, route by category or location, pick your printer\n3. Click **Pair Device**`,
+                body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows 10/11 (desktop app) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows 10/11 (MSI) | \`PrintAgent_*_x64_en-US.msi\` |\n| Windows 7/8/8.1+ 64-bit (browser + helper) | \`PrintAgentHelper-Setup-x64.exe\` |\n| Windows 7/8 32-bit (browser + helper) | \`PrintAgentHelper-Setup-x86.exe\` |\n\n### First Run\n- Windows 10/11: launch PrintAgent — it appears in the system tray\n- Windows 7/8/8.1: open Start Menu → PrintAgent; it starts the helper and opens http://localhost:14200\n- Enter Company Code, select branch, route by category or location, pick your printer\n- Click **Pair Device**`,
                 draft: true,
                 prerelease: false,
               });
@@ -173,8 +173,9 @@ jobs:
         run: |
           Copy-Item ../src-tauri/target/x86_64-win7-windows-msvc/release/print-agent-helper.exe print-agent-helper-x64.exe
           Copy-Item ../src-tauri/target/i686-win7-windows-msvc/release/print-agent-helper.exe print-agent-helper-x86.exe
-          & "C:\Program Files (x86)\NSIS\makensis.exe" /DHELPER_EXE=print-agent-helper-x64.exe /DOUTFILE=PrintAgentHelper-Setup-x64.exe print-agent-helper.nsi
-          & "C:\Program Files (x86)\NSIS\makensis.exe" /DHELPER_EXE=print-agent-helper-x86.exe /DOUTFILE=PrintAgentHelper-Setup-x86.exe print-agent-helper.nsi
+          $appVersion = "${{ github.ref_name }}" -replace '^v', ''
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /DHELPER_EXE=print-agent-helper-x64.exe /DOUTFILE=PrintAgentHelper-Setup-x64.exe /DAPP_VERSION=$appVersion print-agent-helper.nsi
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /DHELPER_EXE=print-agent-helper-x86.exe /DOUTFILE=PrintAgentHelper-Setup-x86.exe /DAPP_VERSION=$appVersion print-agent-helper.nsi
 
       - name: Upload legacy assets to release
         uses: softprops/action-gh-release@v2
@@ -215,7 +216,7 @@ jobs:
                   repo: context.repo.repo,
                   tag_name: tag,
                   name: `PrintAgent ${tag}`,
-                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows 10/11 (desktop app) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows 7/8/8.1+ (browser + helper) | \`PrintAgentHelper-Setup-x64.exe\` |\n\n### First Run\n1. Launch PrintAgent — it appears in the system tray\n2. Enter Company Code, select branch, route by category or location, pick your printer\n3. Click **Pair Device**`,
+                  body: `## PrintAgent ${tag}\n\n### Download\n| Platform | File |\n|----------|------|\n| Windows 10/11 (desktop app) | \`PrintAgent_*_x64-setup.exe\` |\n| Windows 7/8/8.1+ (browser + helper) | \`PrintAgentHelper-Setup-x64.exe\` |\n\n### First Run\n- Windows 10/11: launch PrintAgent — it appears in the system tray\n- Windows 7/8/8.1: open Start Menu → PrintAgent; it starts the helper and opens http://localhost:14200\n- Enter Company Code, select branch, route by category or location, pick your printer\n- Click **Pair Device**`,
                   draft: false,
                   prerelease: false,
                 });
