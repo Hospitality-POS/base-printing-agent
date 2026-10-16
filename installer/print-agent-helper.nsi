@@ -15,8 +15,11 @@
 !ifndef OUTFILE
   !define OUTFILE "PrintAgentHelper-Setup.exe"
 !endif
+!ifndef APP_VERSION
+  !define APP_VERSION "0.9.0"
+!endif
 
-Name "PrintAgent Helper"
+Name "PrintAgent"
 OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\PrintAgent"
 RequestExecutionLevel user          ; no admin needed — per-user install
@@ -26,10 +29,6 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_COMPONENTS    ; "how to run it" options live here
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_RUN "$INSTDIR\print-agent-helper.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Start PrintAgent Helper now"
-!define MUI_FINISHPAGE_LINK "Open PrintAgent setup in browser"
-!define MUI_FINISHPAGE_LINK_LOCATION "http://localhost:14200"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -41,10 +40,37 @@ Section "PrintAgent Helper (required)" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "${HELPER_EXE}"
+  File "..\src-tauri\icons\icon.ico"
+
+  FileOpen $0 "$INSTDIR\PrintAgent.cmd" w
+  FileWrite $0 '@echo off$\r$\n'
+  FileWrite $0 'cd /d "%~dp0"$\r$\n'
+  FileWrite $0 'print-agent-helper.exe --open$\r$\n'
+  FileWrite $0 'if errorlevel 1 pause$\r$\n'
+  FileClose $0
+
   SetOutPath "$INSTDIR\web"
   File /r "web\*.*"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+  CreateDirectory "$SMPROGRAMS\PrintAgent"
+  CreateShortcut "$SMPROGRAMS\PrintAgent\PrintAgent.lnk" \
+    "$INSTDIR\PrintAgent.cmd" "" \
+    "$INSTDIR\icon.ico" 0
+  CreateShortcut "$SMPROGRAMS\PrintAgent\Uninstall PrintAgent.lnk" \
+    "$INSTDIR\Uninstall.exe"
+
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "DisplayName" "PrintAgent"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "Publisher" "Basepoint Cloud Inc"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "DisplayIcon" "$INSTDIR\icon.ico"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "UninstallString" "$INSTDIR\Uninstall.exe"
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent" "NoRepair" 1
+
+  ExecShell "open" "$INSTDIR\PrintAgent.cmd"
 SectionEnd
 
 Section "Start automatically when I sign in" SecAutostart
@@ -53,7 +79,9 @@ Section "Start automatically when I sign in" SecAutostart
 SectionEnd
 
 Section "Desktop shortcut" SecShortcut
-  CreateShortcut "$DESKTOP\PrintAgent.lnk" "http://localhost:14200"
+  CreateShortcut "$DESKTOP\PrintAgent.lnk" \
+    "$INSTDIR\PrintAgent.cmd" "" \
+    "$INSTDIR\icon.ico" 0
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
@@ -64,6 +92,10 @@ SectionEnd
 
 Section "Uninstall"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PrintAgentHelper"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrintAgent"
   Delete "$DESKTOP\PrintAgent.lnk"
+  Delete "$SMPROGRAMS\PrintAgent\PrintAgent.lnk"
+  Delete "$SMPROGRAMS\PrintAgent\Uninstall PrintAgent.lnk"
+  RMDir "$SMPROGRAMS\PrintAgent"
   RMDir /r "$INSTDIR"
 SectionEnd

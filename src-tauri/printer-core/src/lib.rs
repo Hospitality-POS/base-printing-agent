@@ -632,6 +632,28 @@ pub fn format_receipt(job: &PrintJob) -> Vec<u8> {
                 set_text_normal(&mut bytes);
                 set_alignment_left(&mut bytes);
             }
+            // Centered bold line at normal size — report titles/section
+            // headings where a double-height "header" would be oversized.
+            "subheader" => {
+                set_alignment_center(&mut bytes);
+                add_text_bold(&mut bytes, &line.text);
+                bytes.push(LF);
+                set_alignment_left(&mut bytes);
+            }
+            // Left-aligned bold line at normal size — report rows like
+            // category names or totals (text is pre-padded by the sender).
+            "bold" => {
+                set_alignment_left(&mut bytes);
+                add_text_bold(&mut bytes, &line.text);
+                bytes.push(LF);
+            }
+            // Explicit plain left-aligned line — same output as the `_`
+            // fallback, but lets senders be explicit about intent.
+            "text" => {
+                set_alignment_left(&mut bytes);
+                add_text(&mut bytes, &line.text);
+                bytes.push(LF);
+            }
             "item" => {
                 set_alignment_left(&mut bytes);
                 let price = line.price.as_deref().unwrap_or("");

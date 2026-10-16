@@ -15,29 +15,33 @@ fn main() {
         return;
     }
 
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .and_then(|w| w[1].parse::<u16>().ok())
+        .unwrap_or(14200);
+
     if args.iter().any(|a| a == "--install") {
         std::process::exit(install_wizard());
     }
     if args.iter().any(|a| a == "--uninstall") {
         std::process::exit(uninstall());
     }
+    if args.iter().any(|a| a == "--open" || a == "-o") {
+        std::process::exit(open_app(port));
+    }
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("PrintAgent helper — localhost print bridge for the web UI");
         println!("Usage:");
         println!("  print-agent-helper              run the helper server (port 14200)");
+        println!("  print-agent-helper --open       start the helper and open the setup UI");
         println!("  print-agent-helper --install    setup wizard (copy files, autostart)");
         println!("  print-agent-helper --uninstall  remove autostart + installed files");
         println!("  print-agent-helper --check      print OS/printer compatibility report");
         println!("  print-agent-helper --port <n>   listen on a custom port");
         return;
     }
-
-    let port = args
-        .windows(2)
-        .find(|w| w[0] == "--port")
-        .and_then(|w| w[1].parse::<u16>().ok())
-        .unwrap_or(14200);
     let addr = format!("127.0.0.1:{}", port);
 
     let server = match tiny_http::Server::http(&addr) {
@@ -264,6 +268,55 @@ fn json_response(value: &Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>>
     tiny_http::Response::from_string(body).with_header(
         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
     )
+}
+
+fn open_app(port: u16) -> i32 {
+    let addr: SocketAddr = match format!("127.0.0.1:{}", port).parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            eprintln!("Invalid helper port {}: {}", port, e);
+            return 1;
+        }
+    };
+
+    let is_running = || TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
+
+    if !is_running() {
+        let exe = current_exe();
+        if let Err(e) = std::process::Command::new(&exe).spawn() {
+            eprintln!("Failed to start PrintAgent helper: {}", e);
+            return 1;
+        }
+
+        // Older machines can take a few seconds to bind the local server.
+        let mut started = false;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(250));
+            if is_running() {
+                started = true;
+                break;
+            }
+        }
+        if !started {
+            eprintln!("PrintAgent helper did not start on port {}", port);
+            return 1;
+        }
+    }
+
+    let url = format!("http://127.0.0.1:{}", port);
+    let opened = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
+    if opened.is_err() {
+        if let Err(e) = std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+        {
+            eprintln!("Failed to open {}: {}", url, e);
+            return 1;
+        }
+    }
+    0
 }
 
 fn ok_response(result: Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
