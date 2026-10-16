@@ -440,7 +440,7 @@ pub fn test_print(target: &PrintTarget) -> Result<(), String> {
     let mut bytes = Vec::new();
     initialize_printer(&mut bytes);
     add_text_bold(&mut bytes, "  ** TEST PRINT **\n");
-    add_text(&mut bytes, "PrintAgent v0.1.0\n");
+    add_text(&mut bytes, concat!("PrintAgent v", env!("CARGO_PKG_VERSION"), "\n"));
     add_divider(&mut bytes);
     add_text(&mut bytes, "Printer: ");
     add_text(&mut bytes, &target.display());

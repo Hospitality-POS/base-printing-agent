@@ -1,6 +1,6 @@
 [package]
 name = "print-agent"
-version = "0.1.0"
+version = "0.10.0"
 description = "Silent print routing agent for thermal printers"
 authors = ["PrintAgent"]
 edition = "2021"
