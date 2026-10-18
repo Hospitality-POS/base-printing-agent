@@ -28,10 +28,13 @@ pub async fn run_ws_loop(
                 log::info!("WebSocket connected for agent {}", agent_id);
                 {
                     let mut connections = state.agent_connections.lock().await;
-                    connections.entry(agent_id.clone()).or_insert_with(|| crate::AgentConnection {
-                        connected: true,
-                        sender: None,
-                    });
+                    connections
+                        .entry(agent_id.clone())
+                        .and_modify(|c| c.connected = true)
+                        .or_insert_with(|| crate::AgentConnection {
+                            connected: true,
+                            sender: None,
+                        });
                 }
 
                 let (tx, rx): (UnboundedSender<String>, UnboundedReceiver<String>) =
@@ -44,7 +47,7 @@ pub async fn run_ws_loop(
                     }
                 }
 
-                let auth_msg = serde_json::json!({
+                let mut auth = serde_json::json!({
                     "type": "auth",
                     "deviceToken": device_token,
                     "agentId": agent_id,
@@ -52,8 +55,15 @@ pub async fn run_ws_loop(
                     "zones": agent.all_zones(),
                     "branchId": branch_id,
                     "companyCode": company_code,
-                })
-                .to_string();
+                });
+                // Advertise device capabilities (drawer, label, scales, ...).
+                let cfg_now = crate::config::load_config(&state.app_handle).unwrap_or_default();
+                if let (Some(obj), serde_json::Value::Object(caps)) =
+                    (auth.as_object_mut(), crate::devices::capabilities(&agent, &cfg_now))
+                {
+                    obj.extend(caps);
+                }
+                let auth_msg = auth.to_string();
 
                 let (mut write, mut read) = ws_stream.split();
 
@@ -254,7 +264,6 @@ async fn handle_message(
     state: Arc<AppState>,
 ) {
     let agent_id = &agent.agent_id;
-    let company_code = &agent.company_code;
     let value: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -297,8 +306,7 @@ async fn handle_message(
                             job,
                             printer_target,
                             Arc::clone(&state),
-                            agent_id,
-                            company_code,
+                            agent,
                         )
                         .await;
                     }
@@ -310,7 +318,9 @@ async fn handle_message(
             send_via_state(&state, agent_id, r#"{"type":"pong"}"#.to_string()).await;
         }
         Some(t) => {
-            log::debug!("Unhandled WS message type: {}", t);
+            if !crate::devices::handle_ws_message(t, &value, agent, Arc::clone(&state)).await {
+                log::debug!("Unhandled WS message type: {}", t);
+            }
         }
         None => {
             log::warn!("WS message missing 'type' field.");
@@ -318,12 +328,16 @@ async fn handle_message(
     }
 }
 
-async fn send_via_state(state: &Arc<AppState>, agent_id: &str, msg: String) {
+/// Queue a message on the agent's WebSocket. Returns false when not connected.
+pub async fn send_via_state(state: &Arc<AppState>, agent_id: &str, msg: String) -> bool {
     let connections = state.agent_connections.lock().await;
-    if let Some(conn) = connections.get(agent_id) {
-        if let Some(tx) = conn.sender.as_ref() {
-            let _ = tx.send(msg);
-        }
+    match connections.get(agent_id) {
+        Some(conn) if conn.connected => conn
+            .sender
+            .as_ref()
+            .map(|tx| tx.send(msg).is_ok())
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -464,6 +478,8 @@ async fn fetch_and_process_jobs(
                     location_id:      pending_job.location_id.clone(),
                     location_name:    pending_job.location_name.clone(),
                     table_name:       pending_job.table_name.clone(),
+                    open_drawer:      pending_job.open_drawer,
+                    label:            pending_job.label.clone(),
                 };
 
                 job_handler::update_last_job(state, &print_job.job_id);
@@ -476,8 +492,7 @@ async fn fetch_and_process_jobs(
                     print_job,
                     &printer_target,
                     Arc::clone(state),
-                    agent_id,
-                    company_code,
+                    agent,
                 )
                 .await;
 
@@ -503,7 +518,7 @@ async fn fetch_and_process_jobs(
 }
 
 /// Build a PrintTarget from an AgentConfig, covering all three printer types.
-fn build_printer_target(agent: &crate::config::AgentConfig) -> Result<PrintTarget, String> {
+pub fn build_printer_target(agent: &crate::config::AgentConfig) -> Result<PrintTarget, String> {
     match agent.printer_type.as_str() {
         "network" => {
             let host = agent

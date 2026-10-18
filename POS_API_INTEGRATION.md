@@ -580,3 +580,165 @@ else → print → record jobId → send print_ack
 | `jobId` (printed) | ✅ SQLite | Deduplication — keep indefinitely |
 | `jobId` (failed) | ✅ SQLite queue | Retry on next reconnect |
 | Print job `lines` | ❌ discard | No need to persist after printing |
+
+---
+
+## 11. Devices — Cash Drawer, Printer Status, Scales, Label Printers
+
+PrintAgent also drives the other hardware attached to the till PC. Everything
+below is **optional and backwards compatible**: servers that ignore these
+messages keep working unchanged.
+
+### 11.1 Capabilities in `auth`
+
+The `auth` message now also carries what this agent can do:
+
+```json
+{
+  "type": "auth",
+  "agentId": "agt_abc123",
+  "...": "existing fields",
+  "capabilities": ["print", "status", "drawer", "scale"],
+  "printerLanguage": "escpos",
+  "cashDrawer": true,
+  "scales": [{ "id": "scale_1a2b3c4d", "name": "Butchery scale", "protocol": "toledo" }],
+  "localApiPort": 14210
+}
+```
+
+`printerLanguage` is `escpos` (receipt), `zpl` or `tspl` (label printers).
+
+### 11.2 New print job fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `openDrawer` | `boolean` | Kick the cash drawer wired to this receipt printer while the receipt prints. Ignored by label printers. |
+| `label` | `LabelJob` | Layout used when the job is routed to a ZPL/TSPL printer. Without it, a label printer prints the `lines` as plain text rows. |
+
+Both are also accepted on `/api/agents/pending-jobs` items (`open_drawer` / `openDrawer`, `label`).
+
+#### `LabelJob`
+
+All positions and sizes are millimetres from the top-left corner.
+
+```json
+{
+  "widthMm": 50, "heightMm": 30, "gapMm": 2, "dpi": 203, "copies": 1,
+  "elements": [
+    { "type": "text",    "x": 2, "y": 2,  "text": "Beef mince", "sizeMm": 4 },
+    { "type": "text",    "x": 2, "y": 8,  "text": "1.234 kg  KES 987" },
+    { "type": "barcode", "x": 2, "y": 13, "data": "2012345012347", "symbology": "ean13", "heightMm": 10 },
+    { "type": "qrcode",  "x": 36, "y": 2, "data": "https://example.com/o/1042", "cellSize": 4 },
+    { "type": "line",    "x": 0, "y": 12, "width": 50, "height": 0.3 },
+    { "type": "box",     "x": 0, "y": 0, "width": 50, "height": 30, "thicknessMm": 0.3 }
+  ]
+}
+```
+
+`symbology`: `code128` (default), `ean13`, `ean8`, `upca`, `code39`.
+Set `"raw": "^XA...^XZ"` instead of `elements` to send pre-built ZPL/TSPL as-is.
+
+### 11.3 Device messages (server → agent → server)
+
+Every request may carry a `requestId`; the reply echoes it.
+
+| Server sends | Agent replies |
+|--------------|---------------|
+| `{ "type": "open_drawer" }` | `{ "type": "drawer_ack", "status": "opened" \| "failed", "error"? }` |
+| `{ "type": "printer_status_request" }` | `{ "type": "printer_status", "status": PrinterStatus, "checkedAt" }` |
+| `{ "type": "scale_read", "scaleId"? }` | `{ "type": "scale_reading", "scaleId", "reading": WeightReading }` or `{ ..., "error" }` |
+| `{ "type": "scale_command", "scaleId"?, "command": "tare" \| "zero" }` | `{ "type": "scale_command_ack", "status": "ok" \| "failed", "error"? }` |
+| `{ "type": "print_label", "label": LabelJob }` | `{ "type": "label_ack", "status": "printed" \| "failed", "error"? }` |
+
+Replies also include `agentId`. Omitting `scaleId` uses the first scale.
+
+The agent also **pushes** `printer_status` on its own whenever the state
+changes, and at least every 5 minutes (checked every 60 s):
+
+```json
+{
+  "type": "printer_status",
+  "agentId": "agt_abc123",
+  "requestId": null,
+  "checkedAt": "2026-10-18T20:15:05Z",
+  "status": {
+    "state": "warning",
+    "reachable": true,
+    "source": "escpos",
+    "online": true,
+    "coverOpen": false,
+    "paperOut": false,
+    "paperNearEnd": true,
+    "error": false,
+    "drawerPinHigh": true,
+    "queuedJobs": null,
+    "messages": ["Paper is running low"]
+  }
+}
+```
+
+`state` is `ok` · `warning` (paper low) · `error` (paper out, cover open, printer error, offline) ·
+`offline` (port/IP unreachable) · `unknown` (reachable but the printer doesn't report status).
+Status details come from ESC/POS `DLE EOT` (serial/network receipt printers) or the Windows
+spooler (driver-installed printers). Label printers only report reachability.
+
+#### `WeightReading`
+
+```json
+{ "weight": 1.234, "unit": "kg", "stable": true, "overload": false, "underZero": false, "raw": "01.234" }
+```
+
+`weight` is `null` while the scale only reports a status (e.g. still moving). Only
+charge for a weight when `stable` is `true`.
+
+### 11.4 Local device API (desktop app)
+
+For anything a cashier waits on — reading the scale, popping the drawer —
+the POS web app should call PrintAgent **directly on the same PC** instead of
+going through the cloud. The desktop app listens on `http://127.0.0.1:14210`
+(configurable in the app under *Device API*).
+
+| Method & path | Body | Result |
+|---------------|------|--------|
+| `GET  /api/v1/health` | | `{ name, version }` |
+| `GET  /api/v1/devices` | | printers (with latest status) and scales |
+| `GET  /api/v1/printers/{agentId}/status[?refresh=1]` | | `{ agentId, status, checkedAt }` |
+| `POST /api/v1/printers/{agentId}/print` | `PrintJob` | prints locally (no server ack) |
+| `POST /api/v1/printers/{agentId}/label` | `LabelJob` | |
+| `POST /api/v1/printers/{agentId}/drawer` | | |
+| `POST /api/v1/drawer` | `{ "agentId"? }` | the printer marked "cash drawer", or the only receipt printer |
+| `POST /api/v1/label` | `LabelJob` | first label printer |
+| `GET  /api/v1/scales` | | scale configs |
+| `GET  /api/v1/scales/{scaleId\|default}/weight` | | `WeightReading` + `scaleId` |
+| `POST /api/v1/scales/{scaleId\|default}/tare` · `/zero` | | |
+
+Every response is `{ "ok": true, "result": ... }` or `{ "ok": false, "error": "..." }`.
+
+```js
+const r = await fetch("http://127.0.0.1:14210/api/v1/scales/default/weight").then((r) => r.json());
+if (r.ok && r.result.stable) addWeighedItem(r.result.weight, r.result.unit);
+
+await fetch("http://127.0.0.1:14210/api/v1/drawer", { method: "POST" });
+```
+
+**Security.** The API binds to `127.0.0.1` only. Browser requests must come from
+an allowed `Origin` (default: `https://*.reliatech.co.ke`, `http://localhost[:*]`,
+`http://127.0.0.1[:*]`); others get `403`. Requests with no `Origin` header (native
+apps, curl) are allowed. Preflights answer `Access-Control-Allow-Private-Network: true`,
+which Chrome requires before an `https://` page may call a `127.0.0.1` address.
+
+The legacy Windows 7 helper (`print-agent-helper`, port 14200) exposes the same
+device operations through its `/cmd` endpoint (`open_cash_drawer`, `printer_status`,
+`print_label`, `read_scale`, `scale_command`), taking the printer/scale settings in
+the request instead of looking them up.
+
+### 11.5 Supported scales
+
+| Protocol | Typical models | Line settings |
+|----------|----------------|---------------|
+| `toledo` | Mettler Toledo 8217; Dibal, ACLAS, CAS in Toledo mode | 9600 7-E-1 |
+| `nci` | Avery Weigh-Tronix, Brecknell, Salter | 9600 7-E-1 |
+| `cas` | CAS continuous output (`ST,GS,+ 1.234kg`) | 9600 8-N-1 |
+| `generic` | Any scale sending a line with the weight; optional request command | configurable |
+
+Scales can be on a COM / USB-serial port or on the network (TCP).

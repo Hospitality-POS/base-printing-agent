@@ -2682,6 +2682,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
+ "tiny_http",
  "tokio",
  "tokio-tungstenite",
  "urlencoding",

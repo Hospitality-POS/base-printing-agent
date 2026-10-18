@@ -9,10 +9,21 @@ pub async fn handle_print_job(
     job: PrintJob,
     target: &PrintTarget,
     state: Arc<AppState>,
-    agent_id: &str,
-    company_code: &str,
+    agent: &crate::config::AgentConfig,
 ) -> bool {
-    let (status, success) = match printer::print_job(&job, target) {
+    let agent_id = agent.agent_id.as_str();
+    let company_code = agent.company_code.as_str();
+    // Render in the printer's language (ESC/POS receipt or ZPL/TSPL label).
+    let (lang, pin) = (agent.language(), agent.drawer_pin());
+    let print_target = target.clone();
+    let print_job = job.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        printer::print_job_as(&print_job, &print_target, lang, pin)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Print task failed: {}", e)));
+
+    let (status, success) = match result {
         Ok(_) => {
             log::info!(
                 "Job {} printed to '{}' successfully.",

@@ -43,9 +43,26 @@ pub struct AgentConfig {
     pub main_category_ids: Vec<String>,
     #[serde(default)]
     pub locations: Vec<String>,
+    /// "escpos" (receipt, default), "zpl" or "tspl" (label printers).
+    #[serde(default)]
+    pub printer_language: Option<String>,
+    /// A cash drawer is wired to this printer's drawer-kick port.
+    #[serde(default)]
+    pub cash_drawer: bool,
+    /// Drawer-kick pin: "2" (default), "5" or "both".
+    #[serde(default)]
+    pub drawer_pin: Option<String>,
 }
 
 impl AgentConfig {
+    pub fn language(&self) -> printer_core::PrinterLanguage {
+        printer_core::PrinterLanguage::parse(self.printer_language.as_deref())
+    }
+
+    pub fn drawer_pin(&self) -> printer_core::DrawerPin {
+        printer_core::DrawerPin::parse(self.drawer_pin.as_deref())
+    }
+
     /// All routing values this agent accepts, singular + plural combined.
     pub fn all_zones(&self) -> Vec<String> {
         let mut v = self.zones.clone();
@@ -84,6 +101,11 @@ pub struct Config {
     /// development). Falls back to the live API when unset.
     #[serde(default)]
     pub api_url: Option<String>,
+    /// Weighing scales attached to this computer.
+    #[serde(default)]
+    pub scales: Vec<printer_core::ScaleConfig>,
+    #[serde(default)]
+    pub local_api: LocalApiConfig,
 }
 
 impl Default for Config {
@@ -91,6 +113,56 @@ impl Default for Config {
         Config {
             agents: Vec::new(),
             api_url: None,
+            scales: Vec::new(),
+            local_api: LocalApiConfig::default(),
+        }
+    }
+}
+
+pub const DEFAULT_LOCAL_API_PORT: u16 = 14210;
+
+/// Localhost HTTP API the POS web app calls for low-latency device access
+/// (scale weight, cash drawer, printer status, direct printing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalApiConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_local_api_port")]
+    pub port: u16,
+    /// Browser origins allowed to call the API; `*` wildcards allowed.
+    /// Requests without an Origin header (native apps) are always allowed.
+    #[serde(default = "default_allowed_origins")]
+    pub allowed_origins: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_local_api_port() -> u16 {
+    DEFAULT_LOCAL_API_PORT
+}
+
+pub fn default_allowed_origins() -> Vec<String> {
+    [
+        "https://*.reliatech.co.ke",
+        "http://localhost",
+        "http://localhost:*",
+        "http://127.0.0.1",
+        "http://127.0.0.1:*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+impl Default for LocalApiConfig {
+    fn default() -> Self {
+        LocalApiConfig {
+            enabled: true,
+            port: DEFAULT_LOCAL_API_PORT,
+            allowed_origins: default_allowed_origins(),
         }
     }
 }
@@ -145,6 +217,15 @@ pub fn delete_config(app_handle: &tauri::AppHandle) -> Result<(), String> {
         fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Delete the config once no printers remain — but keep it while scales are
+/// still configured, so removing the last printer doesn't lose them.
+pub fn delete_config_if_unused(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    match load_config(app_handle) {
+        Some(cfg) if !cfg.scales.is_empty() => Ok(()),
+        _ => delete_config(app_handle),
+    }
 }
 
 /// Insert the agent, or replace the existing entry with the same agent_id

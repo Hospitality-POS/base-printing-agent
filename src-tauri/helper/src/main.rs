@@ -361,7 +361,7 @@ fn dispatch(cmd: &str, args: &Value) -> tiny_http::Response<std::io::Cursor<Vec<
             }
         }
         "test_print" => match target_from_args(args) {
-            Ok(target) => match printer_core::test_print(&target) {
+            Ok(target) => match printer_core::test_print_as(&target, language_from_args(args)) {
                 Ok(()) => ok_response(Value::Null),
                 Err(e) => error_response(&e),
             },
@@ -371,7 +371,12 @@ fn dispatch(cmd: &str, args: &Value) -> tiny_http::Response<std::io::Cursor<Vec<
             let job: Result<printer_core::PrintJob, _> =
                 serde_json::from_value(args["job"].clone());
             match (job, target_from_args(args)) {
-                (Ok(job), Ok(target)) => match printer_core::print_job(&job, &target) {
+                (Ok(job), Ok(target)) => match printer_core::print_job_as(
+                    &job,
+                    &target,
+                    language_from_args(args),
+                    printer_core::DrawerPin::parse(args["drawerPin"].as_str()),
+                ) {
                     Ok(()) => ok_response(Value::Null),
                     Err(e) => error_response(&e),
                 },
@@ -379,6 +384,47 @@ fn dispatch(cmd: &str, args: &Value) -> tiny_http::Response<std::io::Cursor<Vec<
                 (_, Err(e)) => error_response(&e),
             }
         }
+        "open_cash_drawer" => match target_from_args(args) {
+            Ok(target) => match printer_core::open_cash_drawer(
+                &target,
+                printer_core::DrawerPin::parse(args["drawerPin"].as_str()),
+            ) {
+                Ok(()) => ok_response(Value::Null),
+                Err(e) => error_response(&e),
+            },
+            Err(e) => error_response(&e),
+        },
+        "printer_status" => match target_from_args(args) {
+            Ok(target) => ok_response(json!(printer_core::status::query_status_for(&target, language_from_args(args)))),
+            Err(e) => error_response(&e),
+        },
+        "print_label" => {
+            let label: Result<printer_core::LabelJob, _> = serde_json::from_value(args["label"].clone());
+            match (label, target_from_args(args)) {
+                (Ok(label), Ok(target)) => {
+                    match printer_core::print_label(&label, &target, language_from_args(args)) {
+                        Ok(()) => ok_response(Value::Null),
+                        Err(e) => error_response(&e),
+                    }
+                }
+                (Err(e), _) => error_response(&format!("invalid label payload: {}", e)),
+                (_, Err(e)) => error_response(&e),
+            }
+        }
+        "read_scale" => match serde_json::from_value::<printer_core::ScaleConfig>(args["scale"].clone()) {
+            Ok(scale) => match printer_core::scale::read_weight(&scale) {
+                Ok(r) => ok_response(json!(r)),
+                Err(e) => error_response(&e),
+            },
+            Err(e) => error_response(&format!("invalid scale settings: {}", e)),
+        },
+        "scale_command" => match serde_json::from_value::<printer_core::ScaleConfig>(args["scale"].clone()) {
+            Ok(scale) => match printer_core::scale::send_command(&scale, args["command"].as_str().unwrap_or("")) {
+                Ok(()) => ok_response(Value::Null),
+                Err(e) => error_response(&e),
+            },
+            Err(e) => error_response(&format!("invalid scale settings: {}", e)),
+        },
         "test_printer_connection" => {
             let host = args["printerHost"].as_str().unwrap_or("");
             let port = args["printerNetworkPort"].as_u64().unwrap_or(9100) as u16;
@@ -597,6 +643,10 @@ fn target_from_args(args: &Value) -> Result<PrintTarget, String> {
         printer_host,
         printer_network_port,
     ))
+}
+
+fn language_from_args(args: &Value) -> printer_core::PrinterLanguage {
+    printer_core::PrinterLanguage::parse(args["printerLanguage"].as_str())
 }
 
 fn test_tcp(host: &str, port: u16) -> Result<String, String> {
