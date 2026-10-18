@@ -1,6 +1,6 @@
 [package]
 name = "print-agent-helper"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "Headless print helper for the browser UI on legacy Windows (7/8/8.1) and any OS without WebView2"
 
