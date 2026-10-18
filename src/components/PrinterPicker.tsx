@@ -56,9 +56,12 @@ const TYPES: Array<{ type: PrinterType; icon: IconName; title: string; desc: str
 export default function PrinterPicker({
   value,
   onChange,
+  language = "escpos",
 }: {
   value: PrinterValue;
   onChange: (v: PrinterValue) => void;
+  /** Printer language, so the test is a receipt page or a ZPL/TSPL label. */
+  language?: "escpos" | "zpl" | "tspl";
 }) {
   const toast = useToast();
   const [devices, setDevices] = useState<Device[]>([]);
@@ -117,8 +120,8 @@ export default function PrinterPicker({
   const testPrint = async (target: PrinterValue, key: string) => {
     setTesting(key);
     try {
-      await invoke("test_print", printerArgs(target));
-      toast("success", `Test page sent to ${describePrinter(target)}`);
+      await invoke("test_print", { ...printerArgs(target), printerLanguage: language });
+      toast("success", `Test ${language === "escpos" ? "page" : "label"} sent to ${describePrinter(target)}`);
     } catch (e) {
       toast("error", `Test print failed: ${errorMessage(e)}`);
     } finally {

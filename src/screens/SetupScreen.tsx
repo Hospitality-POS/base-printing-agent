@@ -7,7 +7,8 @@ import PrinterPicker, {
   printerArgs,
   printerIsReady,
 } from "../components/PrinterPicker";
-import { Alert, Badge, Button, Field, Icon, Spinner, errorMessage, useToast } from "../components/ui";
+import { ScaleConfig, ScaleForm, emptyScale } from "../components/ScalesPanel";
+import { Alert, Badge, Button, Field, Icon, IconName, Spinner, errorMessage, useToast } from "../components/ui";
 
 interface Props {
   onPaired: (branchId: string) => void;
@@ -16,7 +17,44 @@ interface Props {
 }
 
 type ApiEnvironment = "live" | "local";
-type Step = "connect" | "choose" | "printer";
+type Step = "device" | "connect" | "choose" | "printer" | "scale" | "drawer";
+type DeviceKind = "receipt" | "label" | "drawer" | "scale";
+
+const DEVICE_KINDS: Array<{ id: DeviceKind; icon: IconName; title: string; desc: string }> = [
+  {
+    id: "receipt",
+    icon: "printer",
+    title: "Receipt / kitchen printer",
+    desc: "Thermal printer for receipts, kitchen and bar tickets",
+  },
+  {
+    id: "label",
+    icon: "tag",
+    title: "Label printer",
+    desc: "Zebra (ZPL), TSC or Xprinter (TSPL) for takeaway, price and barcode labels",
+  },
+  {
+    id: "drawer",
+    icon: "cash",
+    title: "Cash drawer",
+    desc: "Opens through the receipt printer it's plugged into",
+  },
+  {
+    id: "scale",
+    icon: "scale",
+    title: "Weighing scale",
+    desc: "USB, COM or network scale the POS reads weights from",
+  },
+];
+
+interface LocalAgent {
+  agentId: string;
+  companyCode: string;
+  deviceName: string;
+  printerLanguage?: string | null;
+  cashDrawer?: boolean;
+  drawerPin?: string | null;
+}
 
 const LIVE_API_URL = "https://api.hospitality.reliatech.co.ke";
 const LOCAL_API_URL =
@@ -71,15 +109,32 @@ const suggestDeviceName = (names: string[]) => {
   return `${names[0]} +${names.length - 1} more Printer`;
 };
 
-const STEPS: Array<{ id: Step; title: string; desc: string }> = [
-  { id: "connect", title: "Your business", desc: "Company code and branch" },
-  { id: "choose", title: "Choose printer", desc: "Reuse one or add new" },
-  { id: "printer", title: "Connect printer", desc: "Pick the device and test" },
-];
+const DEVICE_STEP = { id: "device" as Step, title: "Device", desc: "What you're connecting" };
+
+const stepsFor = (kind: DeviceKind | null): Array<{ id: Step; title: string; desc: string }> => {
+  if (kind === "scale") return [DEVICE_STEP, { id: "scale", title: "Set up scale", desc: "Port, protocol and test" }];
+  if (kind === "drawer") return [DEVICE_STEP, { id: "drawer", title: "Set up drawer", desc: "Pick its printer and test" }];
+  const noun = kind === "label" ? "label printer" : "printer";
+  return [
+    DEVICE_STEP,
+    { id: "connect", title: "Your business", desc: "Company code and branch" },
+    { id: "choose", title: `Choose ${noun}`, desc: "Reuse one or add new" },
+    { id: "printer", title: `Connect ${noun}`, desc: "Pick the device and test" },
+  ];
+};
 
 export default function SetupScreen({ onPaired, onCancel }: Props) {
   const toast = useToast();
-  const [step, setStep] = useState<Step>("connect");
+  const [step, setStep] = useState<Step>("device");
+
+  // ── Step 0: device kind ──────────────────────────────────────────────────
+  const [kind, setKind] = useState<DeviceKind | null>(null);
+  const [labelLanguage, setLabelLanguage] = useState<"zpl" | "tspl">("tspl");
+  const [cashDrawer, setCashDrawer] = useState(false);
+  const [drawerPin, setDrawerPin] = useState("2");
+  const [localAgents, setLocalAgents] = useState<LocalAgent[]>([]);
+  const [drawerAgentId, setDrawerAgentId] = useState("");
+  const [scale, setScale] = useState<ScaleConfig>(emptyScale());
 
   // ── Step 1: business ──────────────────────────────────────────────────────
   const [apiEnvironment, setApiEnvironment] = useState<ApiEnvironment>("live");
@@ -120,8 +175,9 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
   // Initial load: OS badge, saved API URL, agents already on this computer.
   useEffect(() => {
     invoke<OsInfo>("get_os_version").then(setOsInfo).catch(() => setOsInfo(null));
-    invoke<{ agents: Array<{ agentId: string; companyCode: string }> }>("get_config")
+    invoke<{ agents: LocalAgent[] }>("get_config")
       .then((cfg) => {
+        setLocalAgents(cfg?.agents ?? []);
         setLocalAgentIds((cfg?.agents ?? []).map((a) => a.agentId));
         const known = cfg?.agents?.[0]?.companyCode;
         if (known) setCompanyCode(known);
@@ -244,6 +300,42 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
   };
 
   // ── Navigation ───────────────────────────────────────────────────────────
+  const receiptPrinters = localAgents.filter((a) => (a.printerLanguage ?? "escpos") === "escpos");
+  const printerLanguage = kind === "label" ? labelLanguage : "escpos";
+  const noun = kind === "label" ? "label printer" : "printer";
+
+  const chooseKind = (k: DeviceKind) => {
+    setKind(k);
+    setFormError(null);
+    if (k === "scale") {
+      setScale(emptyScale());
+      setStep("scale");
+    } else if (k === "drawer") {
+      const current = receiptPrinters.find((a) => a.cashDrawer) ?? receiptPrinters[0];
+      setDrawerAgentId(current?.agentId ?? "");
+      setDrawerPin(current?.drawerPin || "2");
+      setStep("drawer");
+    } else {
+      setCashDrawer(false);
+      setStep("connect");
+    }
+  };
+
+  /** No receipt printer here yet: set one up with the drawer option ticked. */
+  const drawerViaNewPrinter = () => {
+    setKind("receipt");
+    setCashDrawer(true);
+    setFormError(null);
+    setStep("connect");
+  };
+
+  const goBack = () => {
+    setFormError(null);
+    if (step === "printer") setStep("choose");
+    else if (step === "choose") setStep("connect");
+    else setStep("device");
+  };
+
   const goChoose = async () => {
     if (!apiUrlIsValid) return toast("error", "Enter a valid API URL starting with http:// or https://.");
     setMode(null);
@@ -275,6 +367,51 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
   };
 
   // ── Submit ───────────────────────────────────────────────────────────────
+  // Printer kind + cash drawer, saved with the agent on this computer.
+  const deviceOptions = () => ({
+    printerLanguage,
+    cashDrawer: kind === "receipt" && cashDrawer,
+    drawerPin,
+  });
+
+  const saveScale = async () => {
+    setFormError(null);
+    if (!scale.name.trim()) return setFormError("Give the scale a name.");
+    if (scale.connection === "serial" && !scale.port.trim()) return setFormError("Choose the scale's port.");
+    if (scale.connection === "network" && !scale.host?.trim()) return setFormError("Enter the scale's IP address.");
+    setSaving(true);
+    try {
+      await invoke("save_scale", { scale: { ...scale, name: scale.name.trim() } });
+      toast("success", `${scale.name.trim()} is connected. The POS can now read its weight.`);
+      onPaired("");
+    } catch (e) {
+      setFormError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveDrawer = async () => {
+    setFormError(null);
+    const target = receiptPrinters.find((a) => a.agentId === drawerAgentId);
+    if (!target) return setFormError("Choose the receipt printer the drawer is plugged into.");
+    setSaving(true);
+    try {
+      await invoke("set_agent_device_options", { agentId: target.agentId, cashDrawer: true, drawerPin });
+      try {
+        await invoke("open_cash_drawer", { agentId: target.agentId });
+        toast("success", `Cash drawer saved on ${target.deviceName} and opened.`);
+      } catch (e) {
+        toast("warning", `Saved, but the drawer didn't open: ${errorMessage(e)}. Try the other pin under Edit.`);
+      }
+      onPaired("");
+    } catch (e) {
+      setFormError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const submit = async () => {
     setFormError(null);
     if (!printerIsReady(printer)) {
@@ -294,6 +431,7 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
           deviceName: selectedAgent.device_name,
           companyId: selectedAgent.company_id,
           ...printerArgs(printer),
+          ...deviceOptions(),
         });
         toast("success", `${selectedAgent.device_name} is now printing from this computer.`);
         onPaired(branchId);
@@ -336,6 +474,7 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
         zones,
         mainCategoryIds: routingMode === "category" ? ids : null,
         locations: routingMode === "location" ? ids : null,
+        ...deviceOptions(),
       });
       toast("success", `${name} is paired and ready to print.`);
       onPaired(branchId);
@@ -346,7 +485,8 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
     }
   };
 
-  const stepIndex = STEPS.findIndex((s) => s.id === step);
+  const STEPS = stepsFor(kind);
+  const stepIndex = Math.max(0, STEPS.findIndex((s) => s.id === step));
   const filteredOptions = routingQuery
     ? routingOptions.filter((o) => o.name.toLowerCase().includes(routingQuery.toLowerCase()))
     : routingOptions;
@@ -357,8 +497,13 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside className="hidden md:flex w-64 shrink-0 flex-col border-r border-gray-800 bg-gray-900/40 px-6 py-7">
         <img src="/logo.png" alt="Base" className="h-10 w-auto self-start" />
-        <h1 className="mt-6 text-lg font-semibold text-white">Set up a printer</h1>
-        <p className="text-sm text-gray-400 mt-1">Connect this computer to your POS in three short steps.</p>
+        <h1 className="mt-6 text-lg font-semibold text-white">
+          {kind ? `Set up a ${DEVICE_KINDS.find((d) => d.id === kind)!.title.toLowerCase()}` : "Set up a device"}
+        </h1>
+        <p className="text-sm text-gray-400 mt-1">
+          Connect this computer's {kind === "scale" ? "scale" : kind === "drawer" ? "cash drawer" : "hardware"} to your POS
+          in {STEPS.length} short steps.
+        </p>
 
         <ol className="mt-8 space-y-1">
           {STEPS.map((s, i) => {
@@ -406,13 +551,19 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
               Step {stepIndex + 1} of {STEPS.length}
             </p>
             <h2 className="text-xl font-semibold text-white mt-1">
-              {step === "connect"
-                ? "Which business is this printer for?"
-                : step === "choose"
-                  ? `Printers at ${branch?.name ?? "this branch"}`
-                  : mode === "existing"
-                    ? `Connect “${selectedAgent?.device_name}” to this computer`
-                    : "Add a new printer"}
+              {step === "device"
+                ? "What do you want to connect?"
+                : step === "scale"
+                  ? "Connect a weighing scale"
+                  : step === "drawer"
+                    ? "Connect a cash drawer"
+                    : step === "connect"
+                      ? `Which business is this ${noun} for?`
+                      : step === "choose"
+                        ? `Printers at ${branch?.name ?? "this branch"}`
+                        : mode === "existing"
+                          ? `Connect “${selectedAgent?.device_name}” to this computer`
+                          : `Add a new ${noun}`}
             </h2>
           </div>
           {onCancel && (
@@ -423,6 +574,95 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
         </header>
 
         <div className="flex-1 overflow-y-auto px-8 pb-6">
+          {/* ── Device kind ── */}
+          {step === "device" && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-3xl">
+              {DEVICE_KINDS.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => chooseKind(d.id)}
+                  className="group flex items-start gap-4 rounded-xl border border-gray-800 bg-gray-900 hover:border-green-500/40 hover:bg-green-500/[0.04] px-5 py-4 text-left transition-colors"
+                >
+                  <span className="w-11 h-11 shrink-0 rounded-xl bg-gray-800 text-gray-300 group-hover:bg-green-500/15 group-hover:text-green-400 flex items-center justify-center transition-colors">
+                    <Icon name={d.icon} className="w-5 h-5" />
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm font-medium text-white">{d.title}</span>
+                    <span className="block text-xs text-gray-400 mt-0.5">{d.desc}</span>
+                  </span>
+                  <Icon name="arrowRight" className="w-4 h-4 mt-1 text-gray-600 group-hover:text-green-400" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* ── Scale ── */}
+          {step === "scale" && (
+            <div className="max-w-5xl space-y-5">
+              <ScaleForm value={scale} onChange={setScale} />
+              <Alert tone="info">
+                Scales are used by the POS on this computer — no company code needed. Put something on the scale and
+                use Test reading before saving.
+              </Alert>
+            </div>
+          )}
+
+          {/* ── Cash drawer ── */}
+          {step === "drawer" && (
+            <div className="max-w-xl space-y-5">
+              {receiptPrinters.length === 0 ? (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-5 space-y-3">
+                  <p className="text-sm text-gray-200">A cash drawer opens through the receipt printer it's plugged into.</p>
+                  <p className="text-sm text-gray-400">
+                    There's no receipt printer on this computer yet. Set one up first — the drawer option will already
+                    be ticked.
+                  </p>
+                  <Button variant="primary" icon="printer" onClick={drawerViaNewPrinter}>
+                    Set up the receipt printer
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <Field label="Plugged into which printer?" required hint="The drawer cable goes into the printer's DK / drawer port.">
+                    <div className="space-y-2">
+                      {receiptPrinters.map((a) => {
+                        const active = a.agentId === drawerAgentId;
+                        return (
+                          <button
+                            key={a.agentId}
+                            type="button"
+                            onClick={() => {
+                              setDrawerAgentId(a.agentId);
+                              setDrawerPin(a.drawerPin || "2");
+                            }}
+                            className={`w-full flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${
+                              active ? "border-green-500/60 bg-green-500/10" : "border-gray-800 hover:border-gray-700 hover:bg-gray-900"
+                            }`}
+                          >
+                            <Icon name="printer" className={`w-4 h-4 ${active ? "text-green-400" : "text-gray-500"}`} />
+                            <span className={`flex-1 text-sm ${active ? "text-white" : "text-gray-200"}`}>{a.deviceName}</span>
+                            {a.cashDrawer && <Badge tone="green">Has drawer</Badge>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                  <Field label="Drawer port" hint="Almost all drawers use pin 2. Try pin 5 if it doesn't open.">
+                    <select className="input-field" value={drawerPin} onChange={(e) => setDrawerPin(e.target.value)}>
+                      <option value="2">Pin 2 (standard)</option>
+                      <option value="5">Pin 5</option>
+                      <option value="both">Both</option>
+                    </select>
+                  </Field>
+                  <button type="button" onClick={drawerViaNewPrinter} className="text-xs text-gray-500 hover:text-green-400">
+                    Drawer is on a printer that isn't set up here yet? Add that printer instead.
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
           {/* ── Step 1 ── */}
           {step === "connect" && (
             <div className="max-w-xl space-y-5">
@@ -740,11 +980,61 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
                     </div>
                   )
                 )}
+
+                {kind === "label" ? (
+                  <Field label="Label language" required hint="Check the printer's model sticker or manual if unsure.">
+                    <div className="grid grid-cols-2 gap-2">
+                      {(
+                        [
+                          { id: "tspl", title: "TSPL", desc: "TSC, Xprinter, Gprinter, most budget printers" },
+                          { id: "zpl", title: "ZPL", desc: "Zebra and ZPL-compatible printers" },
+                        ] as const
+                      ).map((l) => (
+                        <button
+                          key={l.id}
+                          type="button"
+                          onClick={() => setLabelLanguage(l.id)}
+                          className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                            labelLanguage === l.id ? "border-green-500/60 bg-green-500/10" : "border-gray-800 hover:border-gray-700"
+                          }`}
+                        >
+                          <span className={`block text-sm font-medium ${labelLanguage === l.id ? "text-white" : "text-gray-200"}`}>
+                            {l.title}
+                          </span>
+                          <span className="block text-xs text-gray-500 mt-0.5">{l.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                ) : (
+                  <div className="rounded-xl border border-gray-800 p-4 space-y-3">
+                    <label className="flex items-center gap-3 text-sm text-gray-200">
+                      <input
+                        type="checkbox"
+                        className="accent-green-500"
+                        checked={cashDrawer}
+                        onChange={(e) => setCashDrawer(e.target.checked)}
+                      />
+                      A cash drawer is plugged into this printer
+                    </label>
+                    {cashDrawer && (
+                      <Field label="Drawer port" hint="Almost all drawers use pin 2. Try pin 5 if it doesn't open.">
+                        <select className="input-field" value={drawerPin} onChange={(e) => setDrawerPin(e.target.value)}>
+                          <option value="2">Pin 2 (standard)</option>
+                          <option value="5">Pin 5</option>
+                          <option value="both">Both</option>
+                        </select>
+                      </Field>
+                    )}
+                  </div>
+                )}
               </section>
 
               <section>
-                <h3 className="text-sm font-medium text-gray-300 mb-3">Printer on this computer</h3>
-                <PrinterPicker value={printer} onChange={setPrinter} />
+                <h3 className="text-sm font-medium text-gray-300 mb-3">
+                  {kind === "label" ? "Label printer" : "Printer"} on this computer
+                </h3>
+                <PrinterPicker value={printer} onChange={setPrinter} language={printerLanguage} />
               </section>
             </div>
           )}
@@ -752,22 +1042,27 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
 
         {/* ── Footer ── */}
         <footer className="border-t border-gray-800 px-8 py-4 space-y-3">
-          {formError && step === "printer" && (
+          {formError && ["printer", "scale", "drawer"].includes(step) && (
             <Alert tone="error" onClose={() => setFormError(null)}>
               {formError}
             </Alert>
           )}
           <div className="flex items-center justify-between gap-3">
-            {step === "connect" ? (
-              <span />
+            {step === "device" ? (
+              <span className="text-xs text-gray-500">You can add more devices later from the main screen.</span>
             ) : (
-              <Button
-                variant="ghost"
-                icon="arrowLeft"
-                onClick={() => setStep(step === "printer" ? "choose" : "connect")}
-                disabled={saving}
-              >
+              <Button variant="ghost" icon="arrowLeft" onClick={goBack} disabled={saving}>
                 Back
+              </Button>
+            )}
+            {step === "scale" && (
+              <Button variant="primary" size="lg" loading={saving} onClick={saveScale}>
+                Save scale
+              </Button>
+            )}
+            {step === "drawer" && receiptPrinters.length > 0 && (
+              <Button variant="primary" size="lg" icon="cash" loading={saving} disabled={!drawerAgentId} onClick={saveDrawer}>
+                Save and test-open
               </Button>
             )}
             {step === "connect" && (
@@ -784,7 +1079,7 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
                 disabled={!printerIsReady(printer)}
                 onClick={submit}
               >
-                {mode === "existing" ? "Connect printer" : "Pair printer"}
+                {mode === "existing" ? `Connect ${noun}` : `Pair ${noun}`}
               </Button>
             )}
           </div>
