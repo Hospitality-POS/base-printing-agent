@@ -12,8 +12,9 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const cfg = await invoke<{ agents: unknown[] }>("get_config");
-      const any = (cfg?.agents?.length ?? 0) > 0;
+      const cfg = await invoke<{ agents: unknown[]; scales?: unknown[] }>("get_config");
+      // Any printer or scale on this computer means setup has been done.
+      const any = (cfg?.agents?.length ?? 0) + (cfg?.scales?.length ?? 0) > 0;
       setHasAgents(any);
       setView(any ? "status" : "setup");
     } catch {

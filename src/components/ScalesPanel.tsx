@@ -67,7 +67,7 @@ const supportsTare = (s: ScaleConfig) =>
 const supportsZero = (s: ScaleConfig) =>
   s.protocol === "toledo" || s.protocol === "nci" || !!s.zeroCommand;
 
-const emptyScale = (): ScaleConfig => ({
+export const emptyScale = (): ScaleConfig => ({
   id: "",
   name: "",
   connection: "serial",
@@ -201,7 +201,7 @@ function ScaleCard({ scale, onEdit, onRemove }: { scale: ScaleConfig; onEdit: ()
   );
 }
 
-function ScaleForm({ value, onChange }: { value: ScaleConfig; onChange: (v: ScaleConfig) => void }) {
+export function ScaleForm({ value, onChange }: { value: ScaleConfig; onChange: (v: ScaleConfig) => void }) {
   const [ports, setPorts] = useState<PortInfo[] | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [testing, setTesting] = useState(false);

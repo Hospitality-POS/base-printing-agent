@@ -536,6 +536,12 @@ async fn sync_agent_to_api(
     Ok(())
 }
 
+/// "escpos" | "zpl" | "tspl" from whatever the UI sent; None when unset.
+fn normalize_language(lang: Option<String>) -> Option<String> {
+    lang.filter(|l| !l.trim().is_empty())
+        .map(|l| printer::PrinterLanguage::parse(Some(&l)).as_str().to_string())
+}
+
 #[tauri::command]
 pub async fn connect_to_existing_agent(
     app_handle: tauri::AppHandle,
@@ -552,6 +558,9 @@ pub async fn connect_to_existing_agent(
     company_id: Option<String>,
     routing_mode: Option<String>,
     zones: Option<Vec<String>>,
+    printer_language: Option<String>,
+    cash_drawer: Option<bool>,
+    drawer_pin: Option<String>,
 ) -> Result<(), String> {
     // Reuse what we already know about this agent locally, then layer the
     // server-side details passed in from the setup screen on top.
@@ -594,9 +603,14 @@ pub async fn connect_to_existing_agent(
         zones,
         main_category_ids: existing.as_ref().map(|a| a.main_category_ids.clone()).unwrap_or_default(),
         locations: existing.as_ref().map(|a| a.locations.clone()).unwrap_or_default(),
-        printer_language: existing.as_ref().and_then(|a| a.printer_language.clone()),
-        cash_drawer: existing.as_ref().map(|a| a.cash_drawer).unwrap_or(false),
-        drawer_pin: existing.as_ref().and_then(|a| a.drawer_pin.clone()),
+        printer_language: normalize_language(printer_language)
+            .or_else(|| existing.as_ref().and_then(|a| a.printer_language.clone())),
+        cash_drawer: cash_drawer
+            .or_else(|| existing.as_ref().map(|a| a.cash_drawer))
+            .unwrap_or(false),
+        drawer_pin: drawer_pin
+            .filter(|p| !p.is_empty())
+            .or_else(|| existing.as_ref().and_then(|a| a.drawer_pin.clone())),
     };
 
     sync_agent_to_api(&app_handle, &new_agent, &company_code).await?;
@@ -829,8 +843,13 @@ pub async fn pair_device(
     zones: Option<Vec<String>>,
     main_category_ids: Option<Vec<String>>,
     locations: Option<Vec<String>>,
+    printer_language: Option<String>,
+    cash_drawer: Option<bool>,
+    drawer_pin: Option<String>,
 ) -> Result<(), String> {
     let api_base = api_base(&app_handle);
+    let printer_language = normalize_language(printer_language);
+    let drawer_pin = drawer_pin.filter(|p| !p.is_empty());
 
     // The API returns a hardcoded WS URL; when pointing at a local/custom
     // API, derive the WS endpoint from the same host instead.
@@ -867,9 +886,9 @@ pub async fn pair_device(
             zones: zones.clone().unwrap_or_default(),
             main_category_ids: main_category_ids.clone().unwrap_or_default(),
             locations: locations.clone().unwrap_or_default(),
-            printer_language: agent.printer_language.clone(),
-            cash_drawer: agent.cash_drawer,
-            drawer_pin: agent.drawer_pin.clone(),
+            printer_language: printer_language.clone().or_else(|| agent.printer_language.clone()),
+            cash_drawer: cash_drawer.unwrap_or(agent.cash_drawer),
+            drawer_pin: drawer_pin.clone().or_else(|| agent.drawer_pin.clone()),
         };
 
         config::remove_agent(&app_handle, &agent.agent_id)?;
@@ -938,9 +957,9 @@ pub async fn pair_device(
                     zones: zones.clone().unwrap_or_default(),
                     main_category_ids: main_category_ids.clone().unwrap_or_default(),
                     locations: locations.clone().unwrap_or_default(),
-                    printer_language: agent.printer_language.clone(),
-                    cash_drawer: agent.cash_drawer,
-                    drawer_pin: agent.drawer_pin.clone(),
+                    printer_language: printer_language.clone().or_else(|| agent.printer_language.clone()),
+                    cash_drawer: cash_drawer.unwrap_or(agent.cash_drawer),
+                    drawer_pin: drawer_pin.clone().or_else(|| agent.drawer_pin.clone()),
                 };
 
                 config::remove_agent(&app_handle, &agent.agent_id)?;
@@ -993,9 +1012,9 @@ pub async fn pair_device(
         zones: zones.clone().unwrap_or_else(|| vec![zone.clone()]),
         main_category_ids: main_category_ids.clone().unwrap_or_default(),
         locations: locations.clone().unwrap_or_default(),
-        printer_language: None,
-        cash_drawer: false,
-        drawer_pin: None,
+        printer_language: printer_language.clone(),
+        cash_drawer: cash_drawer.unwrap_or(false),
+        drawer_pin: drawer_pin.clone(),
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;

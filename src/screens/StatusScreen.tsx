@@ -195,10 +195,11 @@ export default function StatusScreen({ onAddPrinter, onEmpty }: Props) {
   // This computer's printers come from the local config (one entry per agent).
   const loadAgents = useCallback(async () => {
     try {
-      const cfg = await invoke<{ agents: LocalAgent[] }>("get_config");
+      const cfg = await invoke<{ agents: LocalAgent[]; scales?: unknown[] }>("get_config");
       const list = cfg?.agents ?? [];
       setAgents(list);
-      if (list.length === 0) onEmpty();
+      // Only back to setup when nothing at all is configured (a scale alone counts).
+      if (list.length === 0 && (cfg?.scales?.length ?? 0) === 0) onEmpty();
     } catch (e) {
       setAgents([]);
       toast("error", `Couldn't read printer settings: ${errorMessage(e)}`);
@@ -344,7 +345,7 @@ export default function StatusScreen({ onAddPrinter, onEmpty }: Props) {
           <img src="/logo.png" alt="Base" className="h-8 w-auto" />
           <div className="h-8 w-px bg-gray-800" />
           <div className="min-w-0">
-            <h1 className="text-base font-semibold text-white">Printers on this computer</h1>
+            <h1 className="text-base font-semibold text-white">Devices on this computer</h1>
             <p className="text-xs text-gray-400">
               {agents === null
                 ? "Loading…"
@@ -353,7 +354,7 @@ export default function StatusScreen({ onAddPrinter, onEmpty }: Props) {
           </div>
         </div>
         <Button variant="primary" icon="plus" onClick={onAddPrinter}>
-          Add printer
+          Add device
         </Button>
       </header>
 
@@ -470,7 +471,7 @@ export default function StatusScreen({ onAddPrinter, onEmpty }: Props) {
               className="rounded-2xl border border-dashed border-gray-800 hover:border-green-500/40 hover:bg-green-500/[0.03] min-h-[180px] flex flex-col items-center justify-center gap-2 text-gray-500 hover:text-green-400 transition-colors"
             >
               <Icon name="plus" className="w-6 h-6" />
-              <span className="text-sm font-medium">Add another printer</span>
+              <span className="text-sm font-medium">Add another device</span>
             </button>
           </div>
         )}

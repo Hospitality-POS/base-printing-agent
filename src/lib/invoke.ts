@@ -96,6 +96,15 @@ function helperPrinterArgs(a: AgentConfig) {
   };
 }
 
+/** Printer kind / cash drawer options passed to pair & connect, if any. */
+function deviceOptionsFromArgs(args: Record<string, unknown>): Partial<AgentConfig> {
+  const out: Partial<AgentConfig> = {};
+  if (typeof args.printerLanguage === "string" && args.printerLanguage) out.printerLanguage = args.printerLanguage;
+  if (typeof args.cashDrawer === "boolean") out.cashDrawer = args.cashDrawer;
+  if (typeof args.drawerPin === "string" && args.drawerPin) out.drawerPin = args.drawerPin;
+  return out;
+}
+
 function findAgent(cfg: Config, agentId: unknown): AgentConfig {
   const agent = cfg.agents.find((a) => a.agentId === agentId);
   if (!agent) throw new Error(`Printer ${String(agentId)} is not set up on this computer`);
@@ -390,6 +399,7 @@ async function webInvoke<T>(
         existing.mainCategoryIds =
           (args.mainCategoryIds as string[]) ?? existing.mainCategoryIds;
         existing.locations = (args.locations as string[]) ?? existing.locations;
+        Object.assign(existing, deviceOptionsFromArgs(args));
         saveConfig(cfg);
         return undefined as T;
       }
@@ -447,6 +457,7 @@ async function webInvoke<T>(
         zones: (args.zones as string[]) ?? [args.zone as string],
         mainCategoryIds: (args.mainCategoryIds as string[]) ?? [],
         locations: (args.locations as string[]) ?? [],
+        ...deviceOptionsFromArgs(args),
       });
       saveConfig(cfg);
       return undefined as T;
@@ -524,6 +535,7 @@ async function webInvoke<T>(
         printerType: (args.printerType as string) ?? "serial",
         printerHost: args.printerHost as string | undefined,
         printerNetworkPort: args.printerNetworkPort as number | undefined,
+        ...deviceOptionsFromArgs(args),
       };
 
       // Sync printer settings first; never send blank routing to the server.
