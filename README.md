@@ -2,6 +2,15 @@
 
 Silent, always-on print routing agent for thermal printers. Connects a branch's local USB thermal printer to a multi-tenant SaaS backend via authenticated WebSocket.
 
+It also drives the other till hardware on the same PC:
+
+- **Cash drawer** — kicked through the receipt printer's drawer port (`openDrawer` on a job, the tray menu, or the local API)
+- **Printer status** — paper low / out, cover open, offline; monitored every 60 s and pushed to the server
+- **Weighing scales** — Toledo, NCI, CAS and generic protocols over serial or TCP
+- **Label printers** — ZPL (Zebra) and TSPL (TSC, Xprinter) from a simple mm-based layout
+
+The POS web app reads the scale and opens the drawer through a localhost API on `127.0.0.1:14210`. See [POS_API_INTEGRATION.md §11](POS_API_INTEGRATION.md#11-devices--cash-drawer-printer-status-scales-label-printers) for the protocol.
+
 ## Tech Stack
 
 - **Tauri v2** — Rust backend + React/TypeScript frontend

@@ -1,4 +1,5 @@
 use crate::config::{self, Config};
+use crate::devices;
 use crate::printer;
 use crate::AppState;
 use crate::start_ws_loop;
@@ -476,6 +477,9 @@ pub async fn auto_add_connected_agent(
         zones: Vec::new(),
         main_category_ids: Vec::new(),
         locations: Vec::new(),
+        printer_language: None,
+        cash_drawer: false,
+        drawer_pin: None,
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;
@@ -590,6 +594,9 @@ pub async fn connect_to_existing_agent(
         zones,
         main_category_ids: existing.as_ref().map(|a| a.main_category_ids.clone()).unwrap_or_default(),
         locations: existing.as_ref().map(|a| a.locations.clone()).unwrap_or_default(),
+        printer_language: existing.as_ref().and_then(|a| a.printer_language.clone()),
+        cash_drawer: existing.as_ref().map(|a| a.cash_drawer).unwrap_or(false),
+        drawer_pin: existing.as_ref().and_then(|a| a.drawer_pin.clone()),
     };
 
     sync_agent_to_api(&app_handle, &new_agent, &company_code).await?;
@@ -598,6 +605,7 @@ pub async fn connect_to_existing_agent(
     let only_this = Config {
         agents: vec![new_agent],
         api_url: config::load_config(&app_handle).and_then(|c| c.api_url),
+        ..Default::default()
     };
     start_ws_loop(state.inner().clone(), &only_this).await;
     Ok(())
@@ -634,6 +642,10 @@ pub struct PendingJob {
     #[serde(rename = "status")]
     pub status: String,
     pub lines: Vec<PrintJobLine>,
+    #[serde(default, alias = "openDrawer")]
+    pub open_drawer: bool,
+    #[serde(default)]
+    pub label: Option<printer::LabelJob>,
     #[serde(rename = "retry_count")]
     pub retry_count: i32,
     #[serde(rename = "created_at", default)]
@@ -758,6 +770,7 @@ pub async fn update_agent_printer_port(
         let only_this = Config {
             agents: vec![updated_agent],
             api_url: cfg.api_url.clone(),
+            ..Default::default()
         };
         start_ws_loop(state.inner().clone(), &only_this).await;
     }
@@ -854,6 +867,9 @@ pub async fn pair_device(
             zones: zones.clone().unwrap_or_default(),
             main_category_ids: main_category_ids.clone().unwrap_or_default(),
             locations: locations.clone().unwrap_or_default(),
+            printer_language: agent.printer_language.clone(),
+            cash_drawer: agent.cash_drawer,
+            drawer_pin: agent.drawer_pin.clone(),
         };
 
         config::remove_agent(&app_handle, &agent.agent_id)?;
@@ -922,6 +938,9 @@ pub async fn pair_device(
                     zones: zones.clone().unwrap_or_default(),
                     main_category_ids: main_category_ids.clone().unwrap_or_default(),
                     locations: locations.clone().unwrap_or_default(),
+                    printer_language: agent.printer_language.clone(),
+                    cash_drawer: agent.cash_drawer,
+                    drawer_pin: agent.drawer_pin.clone(),
                 };
 
                 config::remove_agent(&app_handle, &agent.agent_id)?;
@@ -974,6 +993,9 @@ pub async fn pair_device(
         zones: zones.clone().unwrap_or_else(|| vec![zone.clone()]),
         main_category_ids: main_category_ids.clone().unwrap_or_default(),
         locations: locations.clone().unwrap_or_default(),
+        printer_language: None,
+        cash_drawer: false,
+        drawer_pin: None,
     };
 
     config::add_agent(&app_handle, new_agent.clone())?;
@@ -996,43 +1018,237 @@ pub async fn test_print(
     printer_port: Option<String>,
     printer_host: Option<String>,
     printer_network_port: Option<i64>,
+    printer_language: Option<String>,
 ) -> Result<(), String> {
     let cfg = config::load_config(&app_handle).unwrap_or_default();
+    let explicit = printer_type.is_some()
+        && (printer_port.as_deref().is_some_and(|p| !p.is_empty())
+            || printer_host.as_deref().is_some_and(|h| !h.is_empty()));
 
-    let target = if let Some(aid) = agent_id {
-        let agent = cfg.agents.iter().find(|a| a.agent_id == aid)
-            .ok_or_else(|| format!("Agent {} not found", aid))?;
-        printer::PrintTarget::from_fields(
-            &agent.printer_type,
-            &agent.printer_port,
-            agent.printer_host.as_deref(),
-            agent.printer_network_port,
-        )
-    } else if !cfg.agents.is_empty() {
-        let agent = &cfg.agents[0];
-        printer::PrintTarget::from_fields(
-            &agent.printer_type,
-            &agent.printer_port,
-            agent.printer_host.as_deref(),
-            agent.printer_network_port,
-        )
-    } else {
+    // Priority: the named agent, then explicit printer fields (setup / edit
+    // screens testing an unsaved choice), then the first configured agent.
+    let (target, lang) = if let Some(aid) = agent_id.filter(|a| !a.is_empty()) {
+        let agent = devices::find_agent(&cfg, &aid)?;
+        let target = devices::target_for(agent)?;
+        let lang = match printer_language.as_deref() {
+            Some(l) => printer::PrinterLanguage::parse(Some(l)),
+            None => agent.language(),
+        };
+        (target, lang)
+    } else if explicit || cfg.agents.is_empty() {
         let printer_type = printer_type.unwrap_or_else(|| "serial".to_string());
-        let printer_port = printer_port.unwrap_or_default();
-        let printer_host = printer_host.unwrap_or_default();
-        let printer_network_port = printer_network_port.unwrap_or(9100);
-
-        match printer_type.as_str() {
-            "network" => printer::PrintTarget::Network {
-                host: printer_host,
-                port: printer_network_port as u16,
-            },
-            "windows" => printer::PrintTarget::WindowsPrinter(printer_port),
-            _ => printer::PrintTarget::Serial(printer_port),
-        }
+        let target = printer::PrintTarget::from_fields(
+            &printer_type,
+            printer_port.as_deref().unwrap_or(""),
+            printer_host.as_deref(),
+            printer_network_port.or(Some(9100)),
+        );
+        (target, printer::PrinterLanguage::parse(printer_language.as_deref()))
+    } else {
+        let agent = &cfg.agents[0];
+        (devices::target_for(agent)?, agent.language())
     };
 
-    printer::test_print(&target)
+    tokio::task::spawn_blocking(move || printer::test_print_as(&target, lang))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Devices: cash drawer, printer status, labels, scales, local API
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn open_cash_drawer(
+    state: State<'_, Arc<AppState>>,
+    agent_id: Option<String>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || devices::open_drawer_blocking(&state, agent_id.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Status of one printer; `refresh` queries the device now instead of
+/// returning the background monitor's last result.
+#[tauri::command]
+pub async fn get_printer_status(
+    state: State<'_, Arc<AppState>>,
+    agent_id: String,
+    refresh: Option<bool>,
+) -> Result<devices::StatusEntry, String> {
+    if !refresh.unwrap_or(false) {
+        if let Some(entry) = devices::cached_statuses(&state).remove(&agent_id) {
+            return Ok(entry);
+        }
+    }
+    devices::refresh_status(state.inner().clone(), agent_id).await
+}
+
+#[tauri::command]
+pub fn get_printer_statuses(
+    state: State<'_, Arc<AppState>>,
+) -> std::collections::HashMap<String, devices::StatusEntry> {
+    devices::cached_statuses(&state)
+}
+
+/// Local-only device settings for a printer agent. Restarts the agent's
+/// loops so the WebSocket re-advertises its capabilities.
+#[tauri::command]
+pub async fn set_agent_device_options(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    agent_id: String,
+    printer_language: Option<String>,
+    cash_drawer: Option<bool>,
+    drawer_pin: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    let agent = cfg
+        .agents
+        .iter_mut()
+        .find(|a| a.agent_id == agent_id)
+        .ok_or_else(|| format!("Agent {} not found", agent_id))?;
+    if let Some(lang) = printer_language {
+        agent.printer_language = Some(printer::PrinterLanguage::parse(Some(&lang)).as_str().to_string());
+    }
+    if let Some(d) = cash_drawer {
+        agent.cash_drawer = d;
+    }
+    if let Some(pin) = drawer_pin.filter(|p| !p.is_empty()) {
+        agent.drawer_pin = Some(pin);
+    }
+    let only_this = Config {
+        agents: vec![agent.clone()],
+        api_url: cfg.api_url.clone(),
+        ..Default::default()
+    };
+    config::save_config(&app_handle, &cfg)?;
+    start_ws_loop(state.inner().clone(), &only_this).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn print_test_label(
+    state: State<'_, Arc<AppState>>,
+    agent_id: Option<String>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        devices::print_label_blocking(&state, agent_id.as_deref(), &printer::LabelJob::test_label("Test label"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn list_scales(app_handle: tauri::AppHandle) -> Vec<printer::ScaleConfig> {
+    config::load_config(&app_handle).unwrap_or_default().scales
+}
+
+/// Insert or update a scale (an empty id creates a new one). Returns its id.
+#[tauri::command]
+pub async fn save_scale(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    mut scale: printer::ScaleConfig,
+) -> Result<String, String> {
+    if scale.name.trim().is_empty() {
+        return Err("Give the scale a name".into());
+    }
+    if scale.id.trim().is_empty() {
+        scale.id = format!("scale_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    }
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    match cfg.scales.iter_mut().find(|s| s.id == scale.id) {
+        Some(existing) => *existing = scale.clone(),
+        None => cfg.scales.push(scale.clone()),
+    }
+    config::save_config(&app_handle, &cfg)?;
+    // Re-advertise capabilities (scale list) to the server.
+    start_ws_loop(state.inner().clone(), &cfg).await;
+    Ok(scale.id)
+}
+
+#[tauri::command]
+pub async fn remove_scale(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    scale_id: String,
+) -> Result<(), String> {
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    cfg.scales.retain(|s| s.id != scale_id);
+    config::save_config(&app_handle, &cfg)?;
+    start_ws_loop(state.inner().clone(), &cfg).await;
+    Ok(())
+}
+
+/// Read a weight from a saved scale (`scale_id`) or an unsaved config
+/// (`scale`, used by the "Test" button while setting one up).
+#[tauri::command]
+pub async fn read_scale(
+    app_handle: tauri::AppHandle,
+    scale_id: Option<String>,
+    scale: Option<printer::ScaleConfig>,
+) -> Result<printer::WeightReading, String> {
+    let scale = match scale {
+        Some(s) => s,
+        None => {
+            let cfg = config::load_config(&app_handle).unwrap_or_default();
+            devices::find_scale(&cfg, scale_id.as_deref())?.clone()
+        }
+    };
+    tokio::task::spawn_blocking(move || printer::scale::read_weight(&scale))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn scale_command(
+    app_handle: tauri::AppHandle,
+    scale_id: Option<String>,
+    command: String,
+) -> Result<(), String> {
+    let cfg = config::load_config(&app_handle).unwrap_or_default();
+    let scale = devices::find_scale(&cfg, scale_id.as_deref())?.clone();
+    tokio::task::spawn_blocking(move || printer::scale::send_command(&scale, &command))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_local_api_info(app_handle: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let cfg = config::load_config(&app_handle).unwrap_or_default().local_api;
+    let mut info = state.local_api_info.lock().map(|i| i.clone()).unwrap_or_default();
+    info["enabled"] = serde_json::json!(cfg.enabled);
+    info["port"] = serde_json::json!(cfg.port);
+    info["allowedOrigins"] = serde_json::json!(cfg.allowed_origins);
+    info
+}
+
+#[tauri::command]
+pub fn set_local_api_config(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+    port: Option<u16>,
+    allowed_origins: Option<Vec<String>>,
+) -> Result<(), String> {
+    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    cfg.local_api.enabled = enabled;
+    if let Some(p) = port.filter(|p| *p >= 1024) {
+        cfg.local_api.port = p;
+    }
+    if let Some(origins) = allowed_origins {
+        cfg.local_api.allowed_origins = origins
+            .into_iter()
+            .map(|o| o.trim().trim_end_matches('/').to_string())
+            .filter(|o| !o.is_empty())
+            .collect();
+    }
+    config::save_config(&app_handle, &cfg)?;
+    crate::local_api::start(state.inner().clone());
+    Ok(())
 }
 
 /// Deactivate the agent on the API. A 404 counts as success (already gone).
@@ -1091,10 +1307,14 @@ pub async fn unpair_device(
     log::info!("Removed agent connection for: {}", agent_id);
     drop(connections);
 
+    if let Ok(mut statuses) = state.printer_status.lock() {
+        statuses.remove(&agent_id);
+    }
+
     let cfg = config::load_config(&app_handle).unwrap_or_default();
     if cfg.agents.is_empty() {
         log::info!("No agents remaining, deleting config file");
-        config::delete_config(&app_handle)?;
+        config::delete_config_if_unused(&app_handle)?;
     }
 
     Ok(warning)
@@ -1132,8 +1352,11 @@ pub async fn unpair_all_agents(
     let mut connections = state.agent_connections.lock().await;
     connections.clear();
     drop(connections);
+    if let Ok(mut statuses) = state.printer_status.lock() {
+        statuses.clear();
+    }
 
-    config::delete_config(&app_handle)?;
+    config::delete_config_if_unused(&app_handle)?;
 
     log::info!("All agents unpaired successfully");
     if api_failures > 0 {

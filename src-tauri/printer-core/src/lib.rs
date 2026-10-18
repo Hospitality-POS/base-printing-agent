@@ -4,6 +4,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serialport::SerialPortType;
 
+pub mod label;
+pub mod scale;
+pub mod status;
+pub mod transport;
+
+pub use label::{LabelElement, LabelJob, PrinterLanguage};
+pub use scale::{ScaleConfig, WeightReading};
+pub use status::PrinterStatus;
+
 const ESC: u8 = 0x1B;
 const GS: u8 = 0x1D;
 const LF: u8 = 0x0A;
@@ -41,6 +50,12 @@ pub struct PrintJob {
     pub location_name: Option<String>,
     #[serde(rename = "table_name", default)]
     pub table_name: Option<String>,
+    /// Kick the cash drawer connected to this (receipt) printer.
+    #[serde(default, alias = "open_drawer")]
+    pub open_drawer: bool,
+    /// Label layout, used when the job goes to a ZPL/TSPL label printer.
+    #[serde(default)]
+    pub label: Option<LabelJob>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +79,15 @@ impl PrintTarget {
             },
             "windows" => PrintTarget::WindowsPrinter(printer_port.to_string()),
             _ => PrintTarget::Serial(printer_port.to_string()),
+        }
+    }
+
+    /// Key used to serialise access to the same physical device.
+    pub fn lock_key(&self) -> String {
+        match self {
+            PrintTarget::Serial(p) => p.clone(),
+            PrintTarget::Network { host, port } => format!("{}:{}", host, port),
+            PrintTarget::WindowsPrinter(name) => format!("winprinter:{}", name),
         }
     }
 
@@ -431,9 +455,105 @@ fn open_serial_port(port_name: &str) -> Result<Box<dyn SerialPort>, String> {
         .map_err(|e| format!("Failed to open port {}: {}", port_name, e))
 }
 
+// ---------------------------------------------------------------------------
+// Cash drawer
+// ---------------------------------------------------------------------------
+
+/// Which drawer-kick connector pin to pulse. Most drawers use pin 2; some
+/// printers wire a second drawer to pin 5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrawerPin {
+    #[default]
+    Pin2,
+    Pin5,
+    Both,
+}
+
+impl DrawerPin {
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.unwrap_or("").trim() {
+            "5" | "pin5" => DrawerPin::Pin5,
+            "both" => DrawerPin::Both,
+            _ => DrawerPin::Pin2,
+        }
+    }
+}
+
+/// ESC p m t1 t2 — pulse on for 50 ms, off for 500 ms.
+pub fn drawer_kick_bytes(pin: DrawerPin) -> Vec<u8> {
+    let pulse = |m: u8| [ESC, b'p', m, 25, 250];
+    match pin {
+        DrawerPin::Pin2 => pulse(0).to_vec(),
+        DrawerPin::Pin5 => pulse(1).to_vec(),
+        DrawerPin::Both => [pulse(0), pulse(1)].concat(),
+    }
+}
+
+/// Open the cash drawer wired to a receipt printer's drawer-kick port.
+pub fn open_cash_drawer(target: &PrintTarget, pin: DrawerPin) -> Result<(), String> {
+    write_bytes(target, &drawer_kick_bytes(pin))
+}
+
+// ---------------------------------------------------------------------------
+// Printing
+// ---------------------------------------------------------------------------
+
+/// Print a receipt-style job as ESC/POS (back-compat entry point).
 pub fn print_job(job: &PrintJob, target: &PrintTarget) -> Result<(), String> {
-    let bytes = format_receipt(job);
-    write_bytes(target, &bytes)
+    print_job_as(job, target, PrinterLanguage::EscPos, DrawerPin::default())
+}
+
+/// Render the job in the printer's language and send it.
+pub fn print_job_as(
+    job: &PrintJob,
+    target: &PrintTarget,
+    lang: PrinterLanguage,
+    drawer_pin: DrawerPin,
+) -> Result<(), String> {
+    write_bytes(target, &render_job(job, lang, drawer_pin))
+}
+
+pub fn render_job(job: &PrintJob, lang: PrinterLanguage, drawer_pin: DrawerPin) -> Vec<u8> {
+    if lang.is_label() {
+        if job.open_drawer {
+            log::warn!("Job {} asks to open a drawer, but this is a label printer; ignoring.", job.job_id);
+        }
+        let label = job.label.clone().unwrap_or_else(|| {
+            LabelJob::from_lines(&job.lines.iter().map(label_line_text).collect::<Vec<_>>())
+        });
+        return label.render(lang);
+    }
+
+    let mut bytes = format_receipt(job);
+    if job.open_drawer {
+        // Right after ESC @ so the drawer opens while the receipt prints.
+        bytes.splice(2..2, drawer_kick_bytes(drawer_pin));
+    }
+    bytes
+}
+
+fn label_line_text(line: &PrintJobLine) -> String {
+    match (line.qty, line.price.as_deref()) {
+        (Some(q), Some(p)) => format!("{}x {}  {}", q, line.text, p),
+        (Some(q), None) => format!("{}x {}", q, line.text),
+        (None, Some(p)) => format!("{}  {}", line.text, p),
+        _ => line.text.clone(),
+    }
+}
+
+pub fn print_label(label: &LabelJob, target: &PrintTarget, lang: PrinterLanguage) -> Result<(), String> {
+    if !lang.is_label() {
+        return Err("This printer is in receipt mode (ESC/POS); set its language to ZPL or TSPL to print labels".into());
+    }
+    write_bytes(target, &label.render(lang))
+}
+
+/// Test page in the printer's own language.
+pub fn test_print_as(target: &PrintTarget, lang: PrinterLanguage) -> Result<(), String> {
+    if lang.is_label() {
+        return write_bytes(target, &LabelJob::test_label(&target.display()).render(lang));
+    }
+    test_print(target)
 }
 
 pub fn test_print(target: &PrintTarget) -> Result<(), String> {
@@ -452,12 +572,12 @@ pub fn test_print(target: &PrintTarget) -> Result<(), String> {
     write_bytes(target, &bytes)
 }
 
-fn write_bytes(target: &PrintTarget, bytes: &[u8]) -> Result<(), String> {
-    match target {
+pub fn write_bytes(target: &PrintTarget, bytes: &[u8]) -> Result<(), String> {
+    transport::with_port_lock(&target.lock_key(), || match target {
         PrintTarget::Serial(port_name) => write_to_serial(port_name, bytes),
         PrintTarget::Network { host, port } => write_to_network(host, *port, bytes),
         PrintTarget::WindowsPrinter(name) => write_to_windows_printer(name, bytes),
-    }
+    })
 }
 
 fn write_to_serial(port_name: &str, bytes: &[u8]) -> Result<(), String> {
@@ -762,4 +882,34 @@ fn add_feed(buf: &mut Vec<u8>, lines: u8) {
 
 fn cut_paper(buf: &mut Vec<u8>) {
     buf.extend_from_slice(&[GS, b'V', 0]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(open_drawer: bool) -> PrintJob {
+        serde_json::from_value(serde_json::json!({
+            "jobId": "j1", "branchId": "b", "destinationZone": "z", "contentType": "receipt",
+            "cutPaper": false, "priority": "normal", "createdAt": "",
+            "openDrawer": open_drawer,
+            "lines": [{ "type": "item", "text": "Tea", "qty": 2, "price": "100" }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn drawer_kick_follows_init() {
+        let bytes = render_job(&job(true), PrinterLanguage::EscPos, DrawerPin::Pin2);
+        assert_eq!(&bytes[..7], &[ESC, b'@', ESC, b'p', 0, 25, 250]);
+        let plain = render_job(&job(false), PrinterLanguage::EscPos, DrawerPin::Pin2);
+        assert!(!plain.windows(2).any(|w| w == [ESC, b'p']));
+        assert_eq!(drawer_kick_bytes(DrawerPin::Both).len(), 10);
+    }
+
+    #[test]
+    fn lines_fall_back_to_text_label() {
+        let zpl = String::from_utf8(render_job(&job(true), PrinterLanguage::Zpl, DrawerPin::Pin2)).unwrap();
+        assert!(zpl.contains("^FD2x Tea  100^FS"));
+    }
 }

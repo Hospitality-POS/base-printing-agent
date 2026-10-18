@@ -73,11 +73,40 @@ interface AgentConfig {
   zones?: string[];
   mainCategoryIds?: string[];
   locations?: string[];
+  printerLanguage?: string | null;
+  cashDrawer?: boolean;
+  drawerPin?: string | null;
 }
 
 interface Config {
   agents: AgentConfig[];
   apiUrl?: string;
+  scales?: Array<{ id: string; name: string } & Record<string, unknown>>;
+}
+
+/** Printer fields the helper's /cmd endpoint expects for a saved agent. */
+function helperPrinterArgs(a: AgentConfig) {
+  return {
+    printerType: a.printerType,
+    printerPort: a.printerPort,
+    printerHost: a.printerHost,
+    printerNetworkPort: a.printerNetworkPort,
+    printerLanguage: a.printerLanguage ?? "escpos",
+    drawerPin: a.drawerPin ?? "2",
+  };
+}
+
+function findAgent(cfg: Config, agentId: unknown): AgentConfig {
+  const agent = cfg.agents.find((a) => a.agentId === agentId);
+  if (!agent) throw new Error(`Printer ${String(agentId)} is not set up on this computer`);
+  return agent;
+}
+
+function findScale(cfg: Config, scaleId: unknown) {
+  const scales = cfg.scales ?? [];
+  const scale = scaleId && scaleId !== "default" ? scales.find((s) => s.id === scaleId) : scales[0];
+  if (!scale) throw new Error("No scale is set up on this computer");
+  return scale;
 }
 
 function loadConfig(): Config {
@@ -629,6 +658,75 @@ async function webInvoke<T>(
         } as T;
       }
     }
+
+    // ---- Devices (via the legacy helper; no background monitor here) ----
+
+    case "get_printer_statuses":
+      return {} as T;
+
+    case "get_printer_status": {
+      const agent = findAgent(loadConfig(), args.agentId);
+      const status = await helperInvoke<unknown>("printer_status", helperPrinterArgs(agent));
+      return { agentId: agent.agentId, status, checkedAt: new Date().toISOString() } as T;
+    }
+
+    case "open_cash_drawer": {
+      const cfg = loadConfig();
+      const agent = args.agentId
+        ? findAgent(cfg, args.agentId)
+        : cfg.agents.find((a) => a.cashDrawer) ?? cfg.agents[0];
+      if (!agent) throw new Error("No receipt printer is set up on this computer");
+      await helperInvoke("open_cash_drawer", helperPrinterArgs(agent));
+      return agent.agentId as T;
+    }
+
+    case "set_agent_device_options": {
+      const cfg = loadConfig();
+      const agent = findAgent(cfg, args.agentId);
+      if (args.printerLanguage) agent.printerLanguage = args.printerLanguage as string;
+      if (typeof args.cashDrawer === "boolean") agent.cashDrawer = args.cashDrawer;
+      if (args.drawerPin) agent.drawerPin = args.drawerPin as string;
+      saveConfig(cfg);
+      return undefined as T;
+    }
+
+    case "list_scales":
+      return (loadConfig().scales ?? []) as T;
+
+    case "save_scale": {
+      const cfg = loadConfig();
+      const scale = { ...(args.scale as { id: string; name: string }) };
+      if (!scale.id) scale.id = `scale_${Math.random().toString(16).slice(2, 10)}`;
+      const scales = cfg.scales ?? [];
+      const i = scales.findIndex((s) => s.id === scale.id);
+      if (i >= 0) scales[i] = scale;
+      else scales.push(scale);
+      cfg.scales = scales;
+      saveConfig(cfg);
+      return scale.id as T;
+    }
+
+    case "remove_scale": {
+      const cfg = loadConfig();
+      cfg.scales = (cfg.scales ?? []).filter((s) => s.id !== args.scaleId);
+      saveConfig(cfg);
+      return undefined as T;
+    }
+
+    case "read_scale":
+      return helperInvoke<T>("read_scale", {
+        scale: args.scale ?? findScale(loadConfig(), args.scaleId),
+      });
+
+    case "scale_command":
+      return helperInvoke<T>("scale_command", {
+        scale: findScale(loadConfig(), args.scaleId),
+        command: args.command,
+      });
+
+    case "get_local_api_info":
+      // The local device API is part of the desktop app only.
+      return { unsupported: true } as T;
 
     case "get_available_ports":
     case "detect_thermal_printers":

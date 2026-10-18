@@ -1,6 +1,8 @@
 pub mod commands;
 pub mod config;
+pub mod devices;
 pub mod job_handler;
+pub mod local_api;
 pub mod printer;
 pub mod ws_client;
 
@@ -15,6 +17,11 @@ pub struct AppState {
     /// Background WS/polling tasks per agent, so they can be stopped when an
     /// agent is removed or reconfigured (and never duplicated on restart).
     pub agent_tasks: Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
+    /// Latest status per printer agent (from the background monitor).
+    pub printer_status: Mutex<std::collections::HashMap<String, devices::StatusEntry>>,
+    pub local_api_server: Mutex<Option<Arc<tiny_http::Server>>>,
+    /// {running, port, error} for the setup UI.
+    pub local_api_info: Mutex<serde_json::Value>,
     pub app_handle: tauri::AppHandle,
 }
 
@@ -30,6 +37,9 @@ impl AppState {
             last_job_id: Mutex::new(None),
             last_job_time: Mutex::new(None),
             agent_tasks: Mutex::new(std::collections::HashMap::new()),
+            printer_status: Mutex::new(std::collections::HashMap::new()),
+            local_api_server: Mutex::new(None),
+            local_api_info: Mutex::new(serde_json::json!({ "running": false })),
             app_handle,
         }
     }
@@ -97,17 +107,25 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
             );
         }
 
+        let has_valid_printer = match agent.printer_type.as_str() {
+            "network" => {
+                agent.printer_host.as_ref().map_or(false, |h| !h.is_empty())
+                    && agent.printer_network_port.is_some()
+            }
+            "windows" => !agent.printer_port.is_empty(),
+            _ => !agent.printer_port.is_empty(),
+        };
+
+        // Watch paper / cover / online state for any configured printer.
+        if has_valid_printer {
+            handles.push(tokio::spawn(devices::run_status_monitor(
+                Arc::clone(&state),
+                agent.agent_id.clone(),
+            )));
+        }
+
         // Start polling loop for pull-based job fetching
         if !agent.branch_id.is_empty() && !agent.zone.is_empty() {
-            let has_valid_printer = match agent.printer_type.as_str() {
-                "network" => {
-                    agent.printer_host.as_ref().map_or(false, |h| !h.is_empty())
-                        && agent.printer_network_port.is_some()
-                }
-                "windows" => !agent.printer_port.is_empty(),
-                _ => !agent.printer_port.is_empty(),
-            };
-
             if has_valid_printer {
                 log::info!(
                     "Starting polling loop for agent: {} (zone: {})",
@@ -187,6 +205,18 @@ pub fn run() {
             commands::get_os_version,
             commands::get_autostart,
             commands::set_autostart,
+            commands::open_cash_drawer,
+            commands::get_printer_status,
+            commands::get_printer_statuses,
+            commands::set_agent_device_options,
+            commands::print_test_label,
+            commands::list_scales,
+            commands::save_scale,
+            commands::remove_scale,
+            commands::read_scale,
+            commands::scale_command,
+            commands::get_local_api_info,
+            commands::set_local_api_config,
         ])
         .run(tauri::generate_context!())
         .expect("Error running PrintAgent");
@@ -194,6 +224,8 @@ pub fn run() {
 
 async fn setup_app(app_handle: tauri::AppHandle, state: Arc<AppState>) {
     let cfg = config::load_config(&app_handle);
+
+    local_api::start(Arc::clone(&state));
 
     let window = app_handle.get_webview_window("main").unwrap();
 
@@ -220,7 +252,11 @@ fn setup_tray(app_handle: &tauri::AppHandle) {
         MenuItem::with_id(app_handle, "test_print", "Test Print", true, None::<&str>)
             .expect("Failed to create test_print menu item");
 
-    let menu = Menu::with_items(app_handle, &[&show, &test_print_item, &quit])
+    let drawer_item =
+        MenuItem::with_id(app_handle, "open_drawer", "Open Cash Drawer", true, None::<&str>)
+            .expect("Failed to create open_drawer menu item");
+
+    let menu = Menu::with_items(app_handle, &[&show, &test_print_item, &drawer_item, &quit])
         .expect("Failed to create tray menu");
 
     let app_handle_clone = app_handle.clone();
@@ -265,10 +301,23 @@ fn setup_tray(app_handle: &tauri::AppHandle) {
                                 agent.printer_host.as_deref(),
                                 agent.printer_network_port,
                             );
-                            if let Err(e) = printer::test_print(&target) {
+                            let lang = agent.language();
+                            let result = tokio::task::spawn_blocking(move || {
+                                printer::test_print_as(&target, lang)
+                            })
+                            .await;
+                            if let Ok(Err(e)) = result {
                                 log::error!("Tray test print failed: {}", e);
                             }
                         }
+                    }
+                });
+            }
+            "open_drawer" => {
+                let state = app.state::<Arc<AppState>>().inner().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(e) = devices::open_drawer_blocking(&state, None) {
+                        log::error!("Tray open drawer failed: {}", e);
                     }
                 });
             }
