@@ -146,6 +146,11 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
   const [shopsLoading, setShopsLoading] = useState(false);
   const [shopsError, setShopsError] = useState<string | null>(null);
   const [branchId, setBranchId] = useState("");
+  // Pairing and reusing printers need an admin. The token lives only in memory.
+  const [adminPin, setAdminPin] = useState("");
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [osInfo, setOsInfo] = useState<OsInfo | null>(null);
 
   // ── Step 2: choose ────────────────────────────────────────────────────────
@@ -209,6 +214,8 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
     setShops([]);
     setBranchId("");
     setShopsError(null);
+    setAdminToken(null);
+    setSignInError(null);
     if (!code) return;
     const t = setTimeout(async () => {
       setShopsLoading(true);
@@ -232,11 +239,11 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
     return () => clearTimeout(t);
   }, [code, apiUrl, apiUrlLoaded]);
 
-  const loadServerAgents = async () => {
+  const loadServerAgents = async (token: string | null = adminToken) => {
     setAgentsLoading(true);
     try {
       const data = JSON.parse(
-        await invoke<string>("fetch_connected_agents", { companyCode: code, shopId: branchId })
+        await invoke<string>("fetch_connected_agents", { companyCode: code, shopId: branchId, adminToken: token })
       ) as { agents: ServerAgent[] };
       // The server can briefly return the same agent twice — keep one.
       const unique = new Map<string, ServerAgent>();
@@ -338,10 +345,26 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
 
   const goChoose = async () => {
     if (!apiUrlIsValid) return toast("error", "Enter a valid API URL starting with http:// or https://.");
+    let token = adminToken;
+    if (!token) {
+      setSignInError(null);
+      setSigningIn(true);
+      try {
+        await invoke("set_api_url", { url: normalizeApiUrl(apiUrl) });
+        token = await invoke<string>("admin_login", { companyCode: code, pin: adminPin });
+        setAdminToken(token);
+        setAdminPin("");
+      } catch (e) {
+        setSignInError(errorMessage(e));
+        return;
+      } finally {
+        setSigningIn(false);
+      }
+    }
     setMode(null);
     setSelectedAgent(null);
     setStep("choose");
-    await loadServerAgents();
+    await loadServerAgents(token);
   };
 
   const goPrinter = (nextMode: "new" | "existing", agent?: ServerAgent) => {
@@ -432,6 +455,7 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
           companyId: selectedAgent.company_id,
           ...printerArgs(printer),
           ...deviceOptions(),
+          adminToken,
         });
         toast("success", `${selectedAgent.device_name} is now printing from this computer.`);
         onPaired(branchId);
@@ -475,6 +499,7 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
         mainCategoryIds: routingMode === "category" ? ids : null,
         locations: routingMode === "location" ? ids : null,
         ...deviceOptions(),
+        adminToken,
       });
       toast("success", `${name} is paired and ready to print.`);
       onPaired(branchId);
@@ -710,6 +735,31 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
                 </Field>
               )}
 
+              {shops.length > 0 && (
+                <Field label="Admin PIN" required hint="An admin signs in once to set up printers. The PIN isn't saved.">
+                  {adminToken ? (
+                    <div className="flex items-center gap-2 text-sm text-green-400">
+                      <Icon name="check" className="w-4 h-4" />
+                      Signed in as admin
+                    </div>
+                  ) : (
+                    <input
+                      className="input-field text-base"
+                      type="password"
+                      inputMode="numeric"
+                      value={adminPin}
+                      onChange={(e) => setAdminPin(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && branchId && adminPin) goChoose();
+                      }}
+                      autoComplete="off"
+                    />
+                  )}
+                </Field>
+              )}
+
+              {signInError && <Alert tone="error">{signInError}</Alert>}
+
               <div>
                 <button
                   type="button"
@@ -768,7 +818,7 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
                 <h3 className="text-sm font-medium text-gray-300">
                   Existing printers {serverAgents.length > 0 && <span className="text-gray-500">({serverAgents.length})</span>}
                 </h3>
-                <Button size="sm" variant="ghost" icon="refresh" loading={agentsLoading} onClick={loadServerAgents}>
+                <Button size="sm" variant="ghost" icon="refresh" loading={agentsLoading} onClick={() => loadServerAgents()}>
                   Refresh
                 </Button>
               </div>
@@ -1066,7 +1116,13 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
               </Button>
             )}
             {step === "connect" && (
-              <Button variant="primary" size="lg" disabled={!branchId} onClick={goChoose}>
+              <Button
+                variant="primary"
+                size="lg"
+                loading={signingIn}
+                disabled={!branchId || (!adminToken && !adminPin)}
+                onClick={goChoose}
+              >
                 Continue
                 <Icon name="arrowRight" />
               </Button>

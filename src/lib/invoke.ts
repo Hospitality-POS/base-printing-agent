@@ -184,15 +184,36 @@ function apiUrl(path: string) {
   return `${configured ?? API_BASE}${path}`;
 }
 
+/** How a request to /api/agents authenticates: as a paired agent (its
+ * secret from pairing) or as an admin (Bearer token from sign-in). */
+type ApiAuth = { agent?: AgentConfig; adminToken?: unknown };
+
 async function apiFetch(
   path: string,
   init: RequestInit = {},
-  companyCode?: string
+  companyCode?: string,
+  auth: ApiAuth = {}
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   if (companyCode) headers.set("companycode", companyCode);
+  if (typeof auth.adminToken === "string" && auth.adminToken) {
+    headers.set("Authorization", `Bearer ${auth.adminToken}`);
+  } else if (auth.agent?.deviceToken) {
+    headers.set("x-agent-id", auth.agent.agentId);
+    headers.set("x-agent-token", auth.agent.deviceToken);
+  }
   const resp = await fetch(apiUrl(path), { ...init, headers });
   return resp;
+}
+
+/** Setup-time auth: the admin's token if signed in, else an agent already
+ * paired in this browser for the same company. */
+function setupAuth(companyCode: unknown, adminToken?: unknown): ApiAuth {
+  if (typeof adminToken === "string" && adminToken) return { adminToken };
+  const agent = loadConfig().agents.find(
+    (a) => a.companyCode === companyCode && a.deviceToken
+  );
+  return { agent };
 }
 
 async function ensureOk(resp: Response, label: string) {
@@ -203,15 +224,13 @@ async function ensureOk(resp: Response, label: string) {
 }
 
 /** Deactivate an agent on the API. Returns a warning string on failure, else null. */
-async function unpairOnApi(
-  agentId: string,
-  companyCode: string
-): Promise<string | null> {
+async function unpairOnApi(agent: AgentConfig): Promise<string | null> {
   try {
     const resp = await apiFetch(
-      `/api/agents/${encodeURIComponent(agentId)}/unpair`,
+      `/api/agents/${encodeURIComponent(agent.agentId)}/unpair`,
       { method: "DELETE" },
-      companyCode
+      agent.companyCode,
+      { agent }
     );
     if (resp.ok || resp.status === 404) return null;
     const text = await resp.text().catch(() => "");
@@ -226,9 +245,10 @@ async function unpairOnApi(
 async function apiGetJson(
   path: string,
   companyCode: string | undefined,
-  label: string
+  label: string,
+  auth: ApiAuth = {}
 ) {
-  const resp = await apiFetch(path, {}, companyCode);
+  const resp = await apiFetch(path, {}, companyCode, auth);
   await ensureOk(resp, label);
   return resp.json();
 }
@@ -292,6 +312,25 @@ async function webInvoke<T>(
       return JSON.stringify(data) as T;
     }
 
+    case "admin_login": {
+      const resp = await apiFetch(
+        `/users/login`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ method: "pin", pin: args.pin }),
+        },
+        args.companyCode as string
+      );
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.message ?? "Sign-in failed");
+      if (data?.isAdmin !== true && data?.role !== "admin") {
+        throw new Error("Only an admin can set up printers.");
+      }
+      if (!data?.Token) throw new Error("Sign-in response had no token");
+      return data.Token as T;
+    }
+
     case "list_agents": {
       let path = `/api/agents/list?shop_id=${encodeURIComponent(
         args.branchId as string
@@ -300,7 +339,8 @@ async function webInvoke<T>(
       const data = await apiGetJson(
         path,
         args.companyCode as string,
-        "List agents"
+        "List agents",
+        setupAuth(args.companyCode, args.adminToken)
       );
       return JSON.stringify(data.agents ?? data) as T;
     }
@@ -311,7 +351,8 @@ async function webInvoke<T>(
           args.shopId as string
         )}`,
         args.companyCode as string,
-        "Fetch connected agents"
+        "Fetch connected agents",
+        setupAuth(args.companyCode, args.adminToken)
       );
       return JSON.stringify(data) as T;
     }
@@ -320,7 +361,8 @@ async function webInvoke<T>(
       const data = await apiGetJson(
         `/api/agents/list?shop_id=${encodeURIComponent(args.shopId as string)}`,
         args.companyCode as string,
-        "Fetch agents"
+        "Fetch agents",
+        setupAuth(args.companyCode, args.adminToken)
       );
       return (data.agents ?? data) as T;
     }
@@ -351,7 +393,8 @@ async function webInvoke<T>(
         const resp = await apiFetch(
           `/api/agents/pending-jobs?shop_id=${encodeURIComponent(args.shopId as string)}`,
           {},
-          args.companyCode as string
+          args.companyCode as string,
+          setupAuth(args.companyCode)
         );
         await ensureOk(resp, "Fetch pending jobs");
         const body = await resp.json();
@@ -373,7 +416,11 @@ async function webInvoke<T>(
       if (args.zone) path += `&zone=${encodeURIComponent(args.zone as string)}`;
       if (args.status)
         path += `&status=${encodeURIComponent(args.status as string)}`;
-      const resp = await apiFetch(path);
+      const agent = loadConfig().agents.find(
+        (a) => a.branchId === args.shopId && a.deviceToken
+      );
+      if (!agent) throw new Error("No printer paired for this branch in this browser");
+      const resp = await apiFetch(path, {}, agent.companyCode, { agent });
       await ensureOk(resp, "Fetch pending jobs");
       return (await resp.text()) as T;
     }
@@ -417,11 +464,17 @@ async function webInvoke<T>(
         mainCategoryIds: args.mainCategoryIds,
         locations: args.locations,
       };
-      const resp = await apiFetch(`/api/agents/pair`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      if (!args.adminToken) throw new Error("Sign in as an admin to pair a printer.");
+      const resp = await apiFetch(
+        `/api/agents/pair`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        args.companyCode as string,
+        { adminToken: args.adminToken }
+      );
       if (resp.status === 409) {
         const data = await resp.json().catch(() => ({}));
         throw new Error(
@@ -482,7 +535,8 @@ async function webInvoke<T>(
         const details = await apiGetJson(
           `/api/agents/${encodeURIComponent(agentId)}`,
           args.companyCode as string,
-          "Fetch agent"
+          "Fetch agent",
+          setupAuth(args.companyCode)
         );
         printerPort = details.printer_port ?? "";
         printerType = details.printer_type ?? "serial";
@@ -538,6 +592,26 @@ async function webInvoke<T>(
         ...deviceOptionsFromArgs(args),
       };
 
+      // Without the agent's secret in this browser, an admin has the API
+      // issue a new one. That disconnects whichever computer had it before.
+      if (!agent.deviceToken) {
+        if (!args.adminToken) throw new Error("Sign in as an admin to connect this printer.");
+        const tokenResp = await apiFetch(
+          `/api/agents/${encodeURIComponent(agent.agentId)}/token`,
+          { method: "POST" },
+          agent.companyCode,
+          { adminToken: args.adminToken }
+        );
+        await ensureOk(tokenResp, "Issue agent token");
+        const issued = await tokenResp.json();
+        const selectedApi = configuredApiUrl() ?? LIVE_API_URL;
+        agent.deviceToken = issued.deviceToken ?? "";
+        agent.wsUrl =
+          selectedApi === LIVE_API_URL
+            ? issued.wsUrl ?? ""
+            : `${selectedApi.replace(/^http/, "ws")}/ws/agent`;
+      }
+
       // Sync printer settings first; never send blank routing to the server.
       const resp = await apiFetch(
         `/api/agents/${encodeURIComponent(agent.agentId)}/update`,
@@ -553,7 +627,8 @@ async function webInvoke<T>(
             printer_network_port: agent.printerNetworkPort,
           }),
         },
-        agent.companyCode
+        agent.companyCode,
+        { agent }
       );
       await ensureOk(resp, "Sync agent to API");
 
@@ -565,6 +640,7 @@ async function webInvoke<T>(
     case "update_agent_printer_port": {
       const deviceName = ((args.deviceName as string | undefined) ?? "").trim();
       const zone = ((args.zone as string | undefined) ?? "").trim();
+      const self = loadConfig().agents.find((a) => a.agentId === args.agentId);
       const resp = await apiFetch(
         `/api/agents/${encodeURIComponent(args.agentId as string)}/update`,
         {
@@ -579,7 +655,8 @@ async function webInvoke<T>(
             ...(zone && { zone, zones: [zone] }),
           }),
         },
-        args.companyCode as string
+        args.companyCode as string,
+        { agent: self }
       );
       await ensureOk(resp, "Update agent");
 
@@ -605,10 +682,9 @@ async function webInvoke<T>(
     case "unpair_device": {
       const cfg = loadConfig();
       const target = cfg.agents.find((a) => a.agentId === args.agentId);
-      const warning = await unpairOnApi(
-        args.agentId as string,
-        target?.companyCode ?? ""
-      );
+      const warning = target
+        ? await unpairOnApi(target)
+        : "Removed locally, but the server could not be updated (agent not found in this browser)";
       cfg.agents = cfg.agents.filter((a) => a.agentId !== args.agentId);
       saveConfig(cfg);
       return warning as T;
@@ -619,7 +695,7 @@ async function webInvoke<T>(
       const count = cfg.agents.length;
       let failures = 0;
       for (const a of cfg.agents) {
-        if (await unpairOnApi(a.agentId, a.companyCode)) failures++;
+        if (await unpairOnApi(a)) failures++;
       }
       cfg.agents = [];
       saveConfig(cfg);

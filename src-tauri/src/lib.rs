@@ -197,6 +197,7 @@ pub fn run() {
             commands::get_config,
             commands::get_agent_status,
             commands::pair_device,
+            commands::admin_login,
             commands::test_print,
             commands::unpair_device,
             commands::unpair_all_agents,

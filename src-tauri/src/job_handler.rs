@@ -89,8 +89,14 @@ async fn update_job_status_on_api(
         job.job_id, status, agent_id
     );
 
-    match client
-        .post(&url)
+    let agent = crate::config::load_config(app_handle)
+        .and_then(|c| c.agents.into_iter().find(|a| a.agent_id == agent_id));
+    let Some(agent) = agent else {
+        log::error!("Cannot ack job {}: agent {} not found in config", job.job_id, agent_id);
+        return;
+    };
+
+    match crate::commands::with_agent_auth(client.post(&url), &agent)
         .header("companycode", company_code)
         .json(&payload)
         .timeout(std::time::Duration::from_secs(15))
