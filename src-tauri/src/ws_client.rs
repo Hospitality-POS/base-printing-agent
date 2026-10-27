@@ -408,8 +408,7 @@ async fn fetch_and_process_jobs(
         url.push_str(&format!("&zone={}", urlencoding::encode(zone)));
     }
 
-    let resp = client
-        .get(&url)
+    let resp = crate::commands::with_agent_auth(client.get(&url), agent)
         .header("companycode", company_code)
         .timeout(Duration::from_secs(15))
         .send()

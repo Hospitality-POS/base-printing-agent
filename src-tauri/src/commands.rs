@@ -22,6 +22,100 @@ pub fn api_base(app_handle: &tauri::AppHandle) -> String {
         .unwrap_or_else(|| LIVE_API_URL.to_string())
 }
 
+/// Authenticates a request as a paired agent, using the secret issued at pairing.
+pub fn with_agent_auth(req: reqwest::RequestBuilder, agent: &config::AgentConfig) -> reqwest::RequestBuilder {
+    req.header("companycode", &agent.company_code)
+        .header("x-agent-id", &agent.agent_id)
+        .header("x-agent-token", &agent.device_token)
+}
+
+/// Setup-time calls: the admin's Bearer token when signed in, else the secret
+/// of an agent already paired on this machine for the same company.
+fn with_setup_auth(
+    app_handle: &tauri::AppHandle,
+    req: reqwest::RequestBuilder,
+    company_code: &str,
+    admin_token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let req = req.header("companycode", company_code);
+    if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+        return req.bearer_auth(token);
+    }
+    let local = config::load_config(app_handle).and_then(|c| {
+        c.agents
+            .into_iter()
+            .find(|a| a.company_code == company_code && !a.device_token.is_empty())
+    });
+    match local {
+        Some(agent) => req
+            .header("x-agent-id", agent.agent_id)
+            .header("x-agent-token", agent.device_token),
+        None => req,
+    }
+}
+
+/// Signs an admin in to the POS API with their PIN and returns their Bearer
+/// token. The token stays in the setup screen's memory and is never saved.
+#[tauri::command]
+pub async fn admin_login(app_handle: tauri::AppHandle, company_code: String, pin: String) -> Result<String, String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/users/login", api_base(&app_handle)))
+        .header("companycode", &company_code)
+        .json(&serde_json::json!({ "method": "pin", "pin": pin }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Sign-in request failed: {}", e))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if !status.is_success() {
+        let msg = body.get("message").and_then(|m| m.as_str()).unwrap_or("Sign-in failed");
+        return Err(msg.to_string());
+    }
+    let is_admin = body.get("isAdmin").and_then(|v| v.as_bool()) == Some(true)
+        || body.get("role").and_then(|v| v.as_str()) == Some("admin");
+    if !is_admin {
+        return Err("Only an admin can set up printers.".to_string());
+    }
+    body.get("Token")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "Sign-in response had no token".to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentTokenResponse {
+    device_token: String,
+    #[serde(default)]
+    ws_url: String,
+}
+
+/// Has the API issue a new secret for an existing agent (admin only).
+async fn issue_agent_token(
+    app_handle: &tauri::AppHandle,
+    agent_id: &str,
+    company_code: &str,
+    admin_token: &str,
+) -> Result<AgentTokenResponse, String> {
+    let url = format!("{}/api/agents/{}/token", api_base(app_handle), agent_id);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("companycode", company_code)
+        .bearer_auth(admin_token)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Issue agent token request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Issue agent token failed ({}): {}", status, text));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse agent token response: {}", e))
+}
+
 #[tauri::command]
 pub fn get_api_url(app_handle: tauri::AppHandle) -> String {
     api_base(&app_handle)
@@ -232,9 +326,7 @@ async fn fetch_routing_options(app_handle: &tauri::AppHandle, path_env: &str, de
     let sep = if path.contains('?') { "&" } else { "?" };
     let url = format!("{}{}{}{}", api_base, path, sep, format!("shop_id={}", urlencoding::encode(shop_id)));
 
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .header("companycode", company_code)
+    let resp = with_setup_auth(app_handle, reqwest::Client::new().get(&url), company_code, None)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -255,9 +347,7 @@ async fn derive_options_from_jobs(app_handle: &tauri::AppHandle, shop_id: &str, 
     let api_base = api_base(app_handle);
     let url = format!("{}/api/agents/pending-jobs?shop_id={}", api_base, urlencoding::encode(shop_id));
 
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .header("companycode", company_code)
+    let resp = with_setup_auth(app_handle, reqwest::Client::new().get(&url), company_code, None)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -327,6 +417,7 @@ pub async fn list_agents(
     company_code: String,
     branch_id: String,
     zone: Option<String>,
+    admin_token: Option<String>,
 ) -> Result<String, String> {
     let api_base = api_base(&app_handle);
 
@@ -337,9 +428,7 @@ pub async fn list_agents(
         url.push_str(&format!("&zone={}", z));
     }
 
-    let resp = client
-        .get(&url)
-        .header("companycode", &company_code)
+    let resp = with_setup_auth(&app_handle, client.get(&url), &company_code, admin_token.as_deref())
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -365,15 +454,14 @@ pub async fn fetch_connected_agents(
     app_handle: tauri::AppHandle,
     company_code: String,
     shop_id: String,
+    admin_token: Option<String>,
 ) -> Result<String, String> {
     let api_base = api_base(&app_handle);
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/connected?shop_id={}", api_base, shop_id);
 
-    let resp = client
-        .get(&url)
-        .header("companycode", &company_code)
+    let resp = with_setup_auth(&app_handle, client.get(&url), &company_code, admin_token.as_deref())
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -423,7 +511,7 @@ pub async fn auto_add_connected_agent(
                 log::info!("Updated existing agent: {} with branch_id: {}, zone: {}", device_name, shop_id, zone);
 
                 if needs_update {
-                    sync_agent_to_api(&app_handle, agent, &company_code).await?;
+                    sync_agent_to_api(&app_handle, agent).await?;
                 }
             }
         }
@@ -435,9 +523,7 @@ pub async fn auto_add_connected_agent(
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/{}", api_base, agent_id);
 
-    let resp = client
-        .get(&url)
-        .header("companycode", &company_code)
+    let resp = with_setup_auth(&app_handle, client.get(&url), &company_code, None)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await;
@@ -491,7 +577,6 @@ pub async fn auto_add_connected_agent(
 async fn sync_agent_to_api(
     app_handle: &tauri::AppHandle,
     agent: &config::AgentConfig,
-    company_code: &str,
 ) -> Result<(), String> {
     let api_base = api_base(app_handle);
 
@@ -517,9 +602,7 @@ async fn sync_agent_to_api(
         payload["printer_network_port"] = serde_json::Value::Number(port.into());
     }
 
-    let resp = client
-        .put(&url)
-        .header("companycode", company_code)
+    let resp = with_agent_auth(client.put(&url), agent)
         .json(&payload)
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -561,11 +644,31 @@ pub async fn connect_to_existing_agent(
     printer_language: Option<String>,
     cash_drawer: Option<bool>,
     drawer_pin: Option<String>,
+    admin_token: Option<String>,
 ) -> Result<(), String> {
     // Reuse what we already know about this agent locally, then layer the
     // server-side details passed in from the setup screen on top.
     let existing = config::load_config(&app_handle)
         .and_then(|c| c.agents.into_iter().find(|a| a.agent_id == agent_id));
+
+    // Without the agent's secret on this machine, an admin must have the API
+    // issue a new one. That disconnects the computer that had it before.
+    let (device_token, ws_url) = match existing.as_ref().filter(|a| !a.device_token.is_empty()) {
+        Some(a) => (a.device_token.clone(), a.ws_url.clone()),
+        None => {
+            let admin_token = admin_token
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| "Sign in as an admin to connect this printer.".to_string())?;
+            let issued = issue_agent_token(&app_handle, &agent_id, &company_code, &admin_token).await?;
+            let api_base = api_base(&app_handle);
+            let ws_url = if api_base == LIVE_API_URL {
+                issued.ws_url
+            } else {
+                format!("{}/ws/agent", api_base.replacen("http", "ws", 1))
+            };
+            (issued.device_token, ws_url)
+        }
+    };
     let pick = |new: Option<String>, old: Option<&String>| {
         new.filter(|v| !v.is_empty())
             .or_else(|| old.cloned())
@@ -588,10 +691,10 @@ pub async fn connect_to_existing_agent(
         branch_id: pick(shop_id, existing.as_ref().map(|a| &a.branch_id)),
         zone,
         device_name: pick(device_name, existing.as_ref().map(|a| &a.device_name)),
-        device_token: existing.as_ref().map(|a| a.device_token.clone()).unwrap_or_default(),
+        device_token,
         printer_port: printer_port.clone(),
         paper_width: 80,
-        ws_url: existing.as_ref().map(|a| a.ws_url.clone()).unwrap_or_default(),
+        ws_url,
         printer_type: printer_type.clone(),
         printer_host: printer_host.clone(),
         printer_network_port,
@@ -613,7 +716,7 @@ pub async fn connect_to_existing_agent(
             .or_else(|| existing.as_ref().and_then(|a| a.drawer_pin.clone())),
     };
 
-    sync_agent_to_api(&app_handle, &new_agent, &company_code).await?;
+    sync_agent_to_api(&app_handle, &new_agent).await?;
     config::add_agent(&app_handle, new_agent.clone())?;
 
     let only_this = Config {
@@ -685,8 +788,11 @@ pub async fn fetch_pending_jobs(
         url.push_str(&format!("&status={}", s));
     }
 
-    let resp = client
-        .get(&url)
+    let agent = config::load_config(&app_handle)
+        .and_then(|c| c.agents.into_iter().find(|a| a.branch_id == shop_id && !a.device_token.is_empty()))
+        .ok_or_else(|| "No printer paired for this branch on this computer".to_string())?;
+
+    let resp = with_agent_auth(client.get(&url), &agent)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -745,9 +851,14 @@ pub async fn update_agent_printer_port(
         payload["printer_network_port"] = serde_json::Value::Number(port.into());
     }
 
-    let resp = client
-        .put(&url)
-        .header("companycode", &company_code)
+    let agent = config::load_config(&app_handle)
+        .and_then(|c| c.agents.into_iter().find(|a| a.agent_id == agent_id))
+        .ok_or_else(|| format!("Agent {} not found in config", agent_id))?;
+    let mut req = with_agent_auth(client.put(&url), &agent);
+    if !company_code.is_empty() {
+        req = req.header("companycode", &company_code);
+    }
+    let resp = req
         .json(&payload)
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -846,6 +957,7 @@ pub async fn pair_device(
     printer_language: Option<String>,
     cash_drawer: Option<bool>,
     drawer_pin: Option<String>,
+    admin_token: Option<String>,
 ) -> Result<(), String> {
     let api_base = api_base(&app_handle);
     let printer_language = normalize_language(printer_language);
@@ -915,8 +1027,13 @@ pub async fn pair_device(
 
     log::info!("Pairing request to API: {} with body: {}", format!("{}/api/agents/pair", api_base), body);
 
+    let admin_token = admin_token
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "Sign in as an admin to pair a printer.".to_string())?;
     let resp = client
         .post(format!("{}/api/agents/pair", api_base))
+        .header("companycode", &company_code)
+        .bearer_auth(&admin_token)
         .json(&body)
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -1019,7 +1136,7 @@ pub async fn pair_device(
 
     config::add_agent(&app_handle, new_agent.clone())?;
 
-    if let Err(e) = sync_agent_to_api(&app_handle, &new_agent, &company_code).await {
+    if let Err(e) = sync_agent_to_api(&app_handle, &new_agent).await {
         log::error!("Failed to sync printer configuration to server: {}", e);
     }
 
@@ -1273,13 +1390,10 @@ pub fn set_local_api_config(
 /// Deactivate the agent on the API. A 404 counts as success (already gone).
 async fn unpair_on_api(
     app_handle: &tauri::AppHandle,
-    agent_id: &str,
-    company_code: &str,
+    agent: &config::AgentConfig,
 ) -> Result<(), String> {
-    let url = format!("{}/api/agents/{}/unpair", api_base(app_handle), agent_id);
-    let resp = reqwest::Client::new()
-        .delete(&url)
-        .header("companycode", company_code)
+    let url = format!("{}/api/agents/{}/unpair", api_base(app_handle), agent.agent_id);
+    let resp = with_agent_auth(reqwest::Client::new().delete(&url), agent)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -1304,12 +1418,14 @@ pub async fn unpair_device(
 ) -> Result<Option<String>, String> {
     log::info!("Unpairing agent: {}", agent_id);
 
-    let company_code = config::load_config(&app_handle)
-        .and_then(|c| c.agents.into_iter().find(|a| a.agent_id == agent_id))
-        .map(|a| a.company_code)
-        .unwrap_or_default();
+    let agent = config::load_config(&app_handle)
+        .and_then(|c| c.agents.into_iter().find(|a| a.agent_id == agent_id));
 
-    let warning = match unpair_on_api(&app_handle, &agent_id, &company_code).await {
+    let result = match agent {
+        Some(ref a) => unpair_on_api(&app_handle, a).await,
+        None => Err("agent not found on this computer".to_string()),
+    };
+    let warning = match result {
         Ok(()) => None,
         Err(e) => {
             log::warn!("API unpair failed for {}: {}", agent_id, e);
@@ -1355,7 +1471,7 @@ pub async fn unpair_all_agents(
 
     let mut api_failures = 0usize;
     for agent in &cfg.agents {
-        if let Err(e) = unpair_on_api(&app_handle, &agent.agent_id, &agent.company_code).await {
+        if let Err(e) = unpair_on_api(&app_handle, agent).await {
             log::warn!("API unpair failed for {}: {}", agent.agent_id, e);
             api_failures += 1;
         }
@@ -1423,7 +1539,12 @@ pub async fn test_printer_connection(
 }
 
 #[tauri::command]
-pub async fn fetch_agents_from_api(app_handle: tauri::AppHandle, shop_id: String, company_code: String) -> Result<Vec<ServerAgent>, String> {
+pub async fn fetch_agents_from_api(
+    app_handle: tauri::AppHandle,
+    shop_id: String,
+    company_code: String,
+    admin_token: Option<String>,
+) -> Result<Vec<ServerAgent>, String> {
     let api_base = api_base(&app_handle);
     let client = reqwest::Client::new();
     let url = format!("{}/api/agents/list?shop_id={}", api_base, shop_id);
@@ -1431,9 +1552,7 @@ pub async fn fetch_agents_from_api(app_handle: tauri::AppHandle, shop_id: String
     log::info!("Fetching agents from API: {}", url);
     log::info!("Using company code header: {}", company_code);
 
-    let response = client
-        .get(&url)
-        .header("companycode", &company_code)
+    let response = with_setup_auth(&app_handle, client.get(&url), &company_code, admin_token.as_deref())
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await;
