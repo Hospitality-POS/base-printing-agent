@@ -2927,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "print-agent"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "chrono",
  "dotenvy",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "print-agent-helper"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "env_logger",
  "log",
@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "printer-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "log",
  "serde",

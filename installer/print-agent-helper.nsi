@@ -16,7 +16,7 @@
   !define OUTFILE "PrintAgentHelper-Setup.exe"
 !endif
 !ifndef APP_VERSION
-  !define APP_VERSION "0.12.0"
+  !define APP_VERSION "0.12.1"
 !endif
 
 Name "PrintAgent"
