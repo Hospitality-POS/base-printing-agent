@@ -22,37 +22,9 @@ use crate::AppState;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+pub use printer_core::origin::origin_allowed;
+
 type Resp = tiny_http::Response<std::io::Cursor<Vec<u8>>>;
-
-/// Glob match where `*` matches any run of characters.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
-    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
-    while ti < t.len() {
-        if pi < p.len() && p[pi] != '*' && p[pi].eq_ignore_ascii_case(&t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            mark = ti;
-            pi += 1;
-        } else if let Some(s) = star {
-            pi = s + 1;
-            mark += 1;
-            ti = mark;
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|c| *c == '*')
-}
-
-pub fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
-    match origin {
-        None => true,
-        Some(o) => allowed.iter().any(|p| p == "*" || glob_match(p.trim().trim_end_matches('/'), o)),
-    }
-}
 
 /// Start (or restart) the server with the current config.
 pub fn start(state: Arc<AppState>) {

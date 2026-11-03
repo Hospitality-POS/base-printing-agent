@@ -56,6 +56,22 @@ fn main() {
     for mut request in server.incoming_requests() {
         let url = request.url().to_string();
         let method = request.method().as_str().to_string();
+        let origin = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Origin"))
+            .map(|h| h.value.as_str().to_string());
+
+        // Any website the cashier opens could otherwise print, open the
+        // drawer or repoint the API URL through this server.
+        if !printer_core::origin::origin_allowed(origin.as_deref(), &allowed_origins()) {
+            eprintln!("Blocked request from origin {:?}", origin);
+            let _ = request.respond(
+                error_response("Origin not allowed — add it to allowedOrigins in print-agent-helper.json")
+                    .with_status_code(403),
+            );
+            continue;
+        }
 
         let response = match (method.as_str(), url.as_str()) {
             ("OPTIONS", _) => tiny_http::Response::from_string("").with_status_code(204),
@@ -85,7 +101,7 @@ fn main() {
             _ => tiny_http::Response::from_string("not found").with_status_code(404),
         };
 
-        let response = with_cors(response);
+        let response = with_cors(response, origin.as_deref());
         let _ = request.respond(response);
     }
 }
@@ -249,12 +265,33 @@ fn serve_static(path: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     }
 }
 
-fn with_cors(response: tiny_http::Response<std::io::Cursor<Vec<u8>>>) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+/// Browser origins allowed to call the helper: the defaults plus any listed
+/// under `allowedOrigins` in print-agent-helper.json.
+fn allowed_origins() -> Vec<String> {
+    let mut list: Vec<String> = printer_core::origin::DEFAULT_ALLOWED_ORIGINS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(extra) = load_helper_config()["allowedOrigins"].as_array() {
+        list.extend(extra.iter().filter_map(|v| v.as_str()).map(str::to_string));
+    }
+    list
+}
+
+/// CORS headers for an origin that already passed `allowed_origins`.
+fn with_cors(
+    response: tiny_http::Response<std::io::Cursor<Vec<u8>>>,
+    origin: Option<&str>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     let mut r = response;
+    let Some(origin) = origin else { return r };
     for (name, value) in [
-        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Origin", origin),
+        ("Vary", "Origin"),
         ("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"),
         ("Access-Control-Allow-Headers", "Content-Type, companycode"),
+        // Chrome Private Network Access preflight for https → localhost.
+        ("Access-Control-Allow-Private-Network", "true"),
     ] {
         if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             r.add_header(h);

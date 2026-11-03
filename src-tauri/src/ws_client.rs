@@ -453,7 +453,7 @@ async fn fetch_and_process_jobs(
                     &agent.all_main_category_ids(),
                     &agent.all_locations(),
                     &pending_job.zone,
-                    Some(&pending_job.main_category_id),
+                    pending_job.main_category_id.as_deref(),
                     pending_job.location_id.as_deref().or(pending_job.location.as_deref()),
                     pending_job.location_name.as_deref(),
                 ) {
@@ -473,7 +473,7 @@ async fn fetch_and_process_jobs(
                     cut_paper:        pending_job.cut_paper,
                     priority:         pending_job.priority.clone(),
                     created_at:       pending_job.created_at.clone(),
-                    main_category_id: Some(pending_job.main_category_id.clone()),
+                    main_category_id: pending_job.main_category_id.clone(),
                     location:         pending_job.location.clone(),
                     location_id:      pending_job.location_id.clone(),
                     location_name:    pending_job.location_name.clone(),
@@ -484,10 +484,9 @@ async fn fetch_and_process_jobs(
 
                 job_handler::update_last_job(state, &print_job.job_id);
 
-                // handle_print_job returns true on success, false on failure.
-                // It internally calls update_job_status_on_api (the /ack endpoint)
-                // with "printed" or "failed" — so we do NOT call acknowledge_job
-                // separately to avoid double-acking.
+                // handle_print_job acks the job itself (the /ack endpoint),
+                // skips jobs already printed or printing, and leaves failed
+                // jobs pending so a later poll retries them.
                 let success = job_handler::handle_print_job(
                     print_job,
                     &printer_target,
@@ -497,15 +496,8 @@ async fn fetch_and_process_jobs(
                 .await;
 
                 if success {
-                    log::info!("Job {} printed and acknowledged successfully", job_id);
+                    log::info!("Job {} printed and acknowledged", job_id);
                     processed_count += 1;
-                } else {
-                    // Job stays "failed" on the API — it will NOT be re-polled
-                    // unless the server resets its status back to "pending".
-                    log::warn!(
-                        "Job {} failed to print — marked as failed on API",
-                        job_id
-                    );
                 }
             }
             Err(e) => {

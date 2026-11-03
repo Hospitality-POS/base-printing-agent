@@ -210,15 +210,19 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
     setBranchId("");
     setShopsError(null);
     if (!code) return;
+    // A lookup for a code the user has since kept typing must not report back.
+    let stale = false;
     const t = setTimeout(async () => {
       setShopsLoading(true);
       try {
         await invoke("set_api_url", { url: normalizeApiUrl(apiUrl) });
         const list = JSON.parse(await invoke<string>("fetch_shops", { companyCode: code })) as Shop[];
+        if (stale) return;
         setShops(list);
         setBranchId(list.length === 1 ? list[0]._id : "");
         if (list.length === 0) setShopsError("No branches found for this company code.");
       } catch (e) {
+        if (stale) return;
         const msg = errorMessage(e);
         setShopsError(
           msg.includes("404") || msg.includes("Tenant not found")
@@ -226,10 +230,14 @@ export default function SetupScreen({ onPaired, onCancel }: Props) {
             : msg
         );
       } finally {
-        setShopsLoading(false);
+        if (!stale) setShopsLoading(false);
       }
-    }, 700);
-    return () => clearTimeout(t);
+    }, 1200);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+      setShopsLoading(false);
+    };
   }, [code, apiUrl, apiUrlLoaded]);
 
   const loadServerAgents = async () => {

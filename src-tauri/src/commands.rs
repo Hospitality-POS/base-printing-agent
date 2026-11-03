@@ -29,12 +29,13 @@ pub fn get_api_url(app_handle: tauri::AppHandle) -> String {
 
 #[tauri::command]
 pub fn set_api_url(app_handle: tauri::AppHandle, url: Option<String>) -> Result<(), String> {
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
     let cleaned = url
         .map(|u| u.trim().trim_end_matches('/').to_string())
         .filter(|u| !u.is_empty());
-    cfg.api_url = cleaned;
-    config::save_config(&app_handle, &cfg)
+    config::update(&app_handle, |cfg| {
+        cfg.api_url = cleaned;
+        Ok(())
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,7 +141,7 @@ const RUN_VALUE: &str = "PrintAgent";
 pub fn get_autostart() -> bool {
     #[cfg(target_os = "windows")]
     {
-        return std::process::Command::new("reg")
+        return printer_core::hidden_command("reg")
             .args(["query", RUN_KEY, "/v", RUN_VALUE])
             .output()
             .map(|o| o.status.success())
@@ -156,12 +157,11 @@ pub fn get_autostart() -> bool {
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
         if enabled {
             let exe = std::env::current_exe()
                 .map(|p| p.display().to_string())
                 .map_err(|e| e.to_string())?;
-            let out = Command::new("reg")
+            let out = printer_core::hidden_command("reg")
                 .args([
                     "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ",
                     "/d", &format!("\"{}\"", exe), "/f",
@@ -172,7 +172,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
                 return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
             }
         } else {
-            let _ = Command::new("reg")
+            let _ = printer_core::hidden_command("reg")
                 .args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])
                 .output();
         }
@@ -406,28 +406,26 @@ pub async fn auto_add_connected_agent(
     zone: String,
     device_name: String,
 ) -> Result<(), String> {
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
-
-    let agent_exists = cfg.agents.iter().any(|a| a.agent_id == agent_id);
+    let agent_exists = config::load_config(&app_handle)
+        .is_some_and(|c| c.agents.iter().any(|a| a.agent_id == agent_id));
     if agent_exists {
-        for agent in &mut cfg.agents {
-            if agent.agent_id == agent_id {
-                let needs_update = agent.branch_id.is_empty() || (agent.zone.is_empty() && !zone.is_empty());
-
-                if agent.branch_id.is_empty() {
-                    agent.branch_id = shop_id.clone();
-                }
-                if agent.zone.is_empty() && !zone.is_empty() {
-                    agent.zone = zone.clone();
-                }
-                log::info!("Updated existing agent: {} with branch_id: {}, zone: {}", device_name, shop_id, zone);
-
-                if needs_update {
-                    sync_agent_to_api(&app_handle, agent, &company_code).await?;
-                }
+        let updated = config::update(&app_handle, |cfg| {
+            let Some(agent) = cfg.agents.iter_mut().find(|a| a.agent_id == agent_id) else {
+                return Ok(None);
+            };
+            let needs_update = agent.branch_id.is_empty() || (agent.zone.is_empty() && !zone.is_empty());
+            if agent.branch_id.is_empty() {
+                agent.branch_id = shop_id.clone();
             }
+            if agent.zone.is_empty() && !zone.is_empty() {
+                agent.zone = zone.clone();
+            }
+            log::info!("Updated existing agent: {} with branch_id: {}, zone: {}", device_name, shop_id, zone);
+            Ok(needs_update.then(|| agent.clone()))
+        })?;
+        if let Some(agent) = updated {
+            sync_agent_to_api(&app_handle, &agent, &company_code).await?;
         }
-        config::save_config(&app_handle, &cfg)?;
         return Ok(());
     }
 
@@ -625,18 +623,38 @@ pub async fn connect_to_existing_agent(
     Ok(())
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Treat an explicit JSON `null` like a missing field.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+fn null_as_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(true))
+}
+
+/// A job from `/api/agents/pending-jobs`. Only the ids and lines are needed to
+/// print; everything else is optional so one missing or null field (e.g. a
+/// location-routed job with no main category) never stops the job printing.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PendingJob {
     #[serde(rename = "_id")]
     pub _id: String,
     #[serde(rename = "job_id")]
     pub job_id: String,
-    #[serde(rename = "shop_id")]
+    #[serde(rename = "shop_id", default, deserialize_with = "null_as_default")]
     pub shop_id: String,
-    #[serde(rename = "zone")]
+    #[serde(rename = "zone", default, deserialize_with = "null_as_default")]
     pub zone: String,
-    #[serde(rename = "main_category_id")]
-    pub main_category_id: String,
+    #[serde(rename = "main_category_id", default)]
+    pub main_category_id: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
     #[serde(default)]
@@ -645,24 +663,25 @@ pub struct PendingJob {
     pub location_name: Option<String>,
     #[serde(default)]
     pub table_name: Option<String>,
-    #[serde(rename = "order_no")]
-    pub order_no: String,
-    #[serde(rename = "content_type")]
+    #[serde(rename = "order_no", default)]
+    pub order_no: Option<serde_json::Value>,
+    #[serde(rename = "content_type", default, deserialize_with = "null_as_default")]
     pub content_type: String,
-    #[serde(rename = "cut_paper")]
+    #[serde(rename = "cut_paper", default = "default_true", deserialize_with = "null_as_true")]
     pub cut_paper: bool,
-    #[serde(rename = "priority")]
+    #[serde(rename = "priority", default, deserialize_with = "null_as_default")]
     pub priority: String,
-    #[serde(rename = "status")]
+    #[serde(rename = "status", default, deserialize_with = "null_as_default")]
     pub status: String,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub lines: Vec<PrintJobLine>,
-    #[serde(default, alias = "openDrawer")]
+    #[serde(default, alias = "openDrawer", deserialize_with = "null_as_default")]
     pub open_drawer: bool,
     #[serde(default)]
     pub label: Option<printer::LabelJob>,
-    #[serde(rename = "retry_count")]
+    #[serde(rename = "retry_count", default, deserialize_with = "null_as_default")]
     pub retry_count: i32,
-    #[serde(rename = "created_at", default)]
+    #[serde(rename = "created_at", default, deserialize_with = "null_as_default")]
     pub created_at: String,
 }
 
@@ -760,8 +779,10 @@ pub async fn update_agent_printer_port(
         return Err(format!("Update agent failed ({}): {}", status, text));
     }
 
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
-    if let Some(agent) = cfg.agents.iter_mut().find(|a| a.agent_id == agent_id) {
+    let updated = config::update(&app_handle, |cfg| {
+        let Some(agent) = cfg.agents.iter_mut().find(|a| a.agent_id == agent_id) else {
+            return Ok(None);
+        };
         agent.printer_port = printer_port.clone();
         agent.printer_type = printer_type.clone();
         agent.printer_host = printer_host.clone();
@@ -773,8 +794,9 @@ pub async fn update_agent_printer_port(
             agent.zone = z.clone();
             agent.zones = vec![z];
         }
-        let updated_agent = agent.clone();
-        config::save_config(&app_handle, &cfg)?;
+        Ok(Some((agent.clone(), cfg.api_url.clone())))
+    })?;
+    if let Some((updated_agent, api_url)) = updated {
         log::info!(
             "Updated local config for agent: {} - printer_type: {}, printer_port: {}, printer_host: {:?}, printer_network_port: {:?}",
             agent_id, printer_type, printer_port, printer_host, printer_network_port
@@ -783,7 +805,7 @@ pub async fn update_agent_printer_port(
         // routing are used immediately (running loops hold a config copy).
         let only_this = Config {
             agents: vec![updated_agent],
-            api_url: cfg.api_url.clone(),
+            api_url,
             ..Default::default()
         };
         start_ws_loop(state.inner().clone(), &only_this).await;
@@ -891,7 +913,6 @@ pub async fn pair_device(
             drawer_pin: drawer_pin.clone().or_else(|| agent.drawer_pin.clone()),
         };
 
-        config::remove_agent(&app_handle, &agent.agent_id)?;
         config::add_agent(&app_handle, updated_agent)?;
 
         let new_cfg = config::load_config(&app_handle).unwrap_or_default();
@@ -962,7 +983,6 @@ pub async fn pair_device(
                     drawer_pin: drawer_pin.clone().or_else(|| agent.drawer_pin.clone()),
                 };
 
-                config::remove_agent(&app_handle, &agent.agent_id)?;
                 config::add_agent(&app_handle, updated_agent)?;
 
                 let new_cfg = config::load_config(&app_handle).unwrap_or_default();
@@ -1122,27 +1142,27 @@ pub async fn set_agent_device_options(
     cash_drawer: Option<bool>,
     drawer_pin: Option<String>,
 ) -> Result<(), String> {
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
-    let agent = cfg
-        .agents
-        .iter_mut()
-        .find(|a| a.agent_id == agent_id)
-        .ok_or_else(|| format!("Agent {} not found", agent_id))?;
-    if let Some(lang) = printer_language {
-        agent.printer_language = Some(printer::PrinterLanguage::parse(Some(&lang)).as_str().to_string());
-    }
-    if let Some(d) = cash_drawer {
-        agent.cash_drawer = d;
-    }
-    if let Some(pin) = drawer_pin.filter(|p| !p.is_empty()) {
-        agent.drawer_pin = Some(pin);
-    }
-    let only_this = Config {
-        agents: vec![agent.clone()],
-        api_url: cfg.api_url.clone(),
-        ..Default::default()
-    };
-    config::save_config(&app_handle, &cfg)?;
+    let only_this = config::update(&app_handle, |cfg| {
+        let agent = cfg
+            .agents
+            .iter_mut()
+            .find(|a| a.agent_id == agent_id)
+            .ok_or_else(|| format!("Agent {} not found", agent_id))?;
+        if let Some(lang) = printer_language {
+            agent.printer_language = Some(printer::PrinterLanguage::parse(Some(&lang)).as_str().to_string());
+        }
+        if let Some(d) = cash_drawer {
+            agent.cash_drawer = d;
+        }
+        if let Some(pin) = drawer_pin.filter(|p| !p.is_empty()) {
+            agent.drawer_pin = Some(pin);
+        }
+        Ok(Config {
+            agents: vec![agent.clone()],
+            api_url: cfg.api_url.clone(),
+            ..Default::default()
+        })
+    })?;
     start_ws_loop(state.inner().clone(), &only_this).await;
     Ok(())
 }
@@ -1178,12 +1198,13 @@ pub async fn save_scale(
     if scale.id.trim().is_empty() {
         scale.id = format!("scale_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
     }
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
-    match cfg.scales.iter_mut().find(|s| s.id == scale.id) {
-        Some(existing) => *existing = scale.clone(),
-        None => cfg.scales.push(scale.clone()),
-    }
-    config::save_config(&app_handle, &cfg)?;
+    let cfg = config::update(&app_handle, |cfg| {
+        match cfg.scales.iter_mut().find(|s| s.id == scale.id) {
+            Some(existing) => *existing = scale.clone(),
+            None => cfg.scales.push(scale.clone()),
+        }
+        Ok(cfg.clone())
+    })?;
     // Re-advertise capabilities (scale list) to the server.
     start_ws_loop(state.inner().clone(), &cfg).await;
     Ok(scale.id)
@@ -1195,9 +1216,10 @@ pub async fn remove_scale(
     state: State<'_, Arc<AppState>>,
     scale_id: String,
 ) -> Result<(), String> {
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
-    cfg.scales.retain(|s| s.id != scale_id);
-    config::save_config(&app_handle, &cfg)?;
+    let cfg = config::update(&app_handle, |cfg| {
+        cfg.scales.retain(|s| s.id != scale_id);
+        Ok(cfg.clone())
+    })?;
     start_ws_loop(state.inner().clone(), &cfg).await;
     Ok(())
 }
@@ -1253,19 +1275,20 @@ pub fn set_local_api_config(
     port: Option<u16>,
     allowed_origins: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
-    cfg.local_api.enabled = enabled;
-    if let Some(p) = port.filter(|p| *p >= 1024) {
-        cfg.local_api.port = p;
-    }
-    if let Some(origins) = allowed_origins {
-        cfg.local_api.allowed_origins = origins
-            .into_iter()
-            .map(|o| o.trim().trim_end_matches('/').to_string())
-            .filter(|o| !o.is_empty())
-            .collect();
-    }
-    config::save_config(&app_handle, &cfg)?;
+    config::update(&app_handle, |cfg| {
+        cfg.local_api.enabled = enabled;
+        if let Some(p) = port.filter(|p| *p >= 1024) {
+            cfg.local_api.port = p;
+        }
+        if let Some(origins) = allowed_origins {
+            cfg.local_api.allowed_origins = origins
+                .into_iter()
+                .map(|o| o.trim().trim_end_matches('/').to_string())
+                .filter(|o| !o.is_empty())
+                .collect();
+        }
+        Ok(())
+    })?;
     crate::local_api::start(state.inner().clone());
     Ok(())
 }
@@ -1471,31 +1494,48 @@ pub async fn remove_duplicate_agents(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, String> {
-    let mut cfg = config::load_config(&app_handle).unwrap_or_default();
+    let (count, cfg) = config::update(&app_handle, |cfg| {
+        log::info!("Current agent count: {}", cfg.agents.len());
 
-    log::info!("Current agent count: {}", cfg.agents.len());
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut duplicates_to_remove = Vec::new();
 
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut duplicates_to_remove = Vec::new();
-
-    for (index, agent) in cfg.agents.iter().enumerate() {
-        if seen_ids.contains(&agent.agent_id) {
-            duplicates_to_remove.push(index);
-        } else {
-            seen_ids.insert(agent.agent_id.clone());
+        for (index, agent) in cfg.agents.iter().enumerate() {
+            if seen_ids.contains(&agent.agent_id) {
+                duplicates_to_remove.push(index);
+            } else {
+                seen_ids.insert(agent.agent_id.clone());
+            }
         }
-    }
 
-    let count = duplicates_to_remove.len();
-    log::info!("Found {} duplicates to remove", count);
+        let count = duplicates_to_remove.len();
+        log::info!("Found {} duplicates to remove", count);
 
-    for index in duplicates_to_remove.into_iter().rev() {
-        let removed = cfg.agents.remove(index);
-        log::info!("Removed duplicate agent: {:?}", removed.device_name);
-    }
-
-    config::save_config(&app_handle, &cfg)?;
+        for index in duplicates_to_remove.into_iter().rev() {
+            let removed = cfg.agents.remove(index);
+            log::info!("Removed duplicate agent: {:?}", removed.device_name);
+        }
+        Ok((count, cfg.clone()))
+    })?;
     start_ws_loop(state.inner().clone(), &cfg).await;
 
     Ok(count)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_job_tolerates_missing_and_null_fields() {
+        let job: PendingJob = serde_json::from_value(serde_json::json!({
+            "_id": "x", "job_id": "j1", "zone": null, "main_category_id": null,
+            "order_no": 42, "status": null,
+            "lines": [{ "type": "text", "text": "Hi" }]
+        }))
+        .unwrap();
+        assert_eq!(job.zone, "");
+        assert_eq!(job.main_category_id, None);
+        assert!(job.cut_paper);
+        assert_eq!(job.lines.len(), 1);
+    }
 }
