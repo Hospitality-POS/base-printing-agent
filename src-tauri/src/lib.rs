@@ -14,6 +14,8 @@ pub struct AppState {
     pub agent_connections: AsyncMutex<std::collections::HashMap<String, AgentConnection>>,
     pub last_job_id: Mutex<Option<String>>,
     pub last_job_time: Mutex<Option<String>>,
+    /// Which jobs are printing / printed / failing, shared by WS and polling.
+    pub job_ledger: job_handler::JobLedger,
     /// Background WS/polling tasks per agent, so they can be stopped when an
     /// agent is removed or reconfigured (and never duplicated on restart).
     pub agent_tasks: Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
@@ -36,6 +38,7 @@ impl AppState {
             agent_connections: AsyncMutex::new(std::collections::HashMap::new()),
             last_job_id: Mutex::new(None),
             last_job_time: Mutex::new(None),
+            job_ledger: job_handler::JobLedger::default(),
             agent_tasks: Mutex::new(std::collections::HashMap::new()),
             printer_status: Mutex::new(std::collections::HashMap::new()),
             local_api_server: Mutex::new(None),
@@ -156,6 +159,16 @@ pub async fn start_ws_loop(state: Arc<AppState>, cfg: &config::Config) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be first: a second launch (autostart + a manual start) would
+        // otherwise run a second agent that prints every job again. Instead
+        // it just brings the running app's window forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();

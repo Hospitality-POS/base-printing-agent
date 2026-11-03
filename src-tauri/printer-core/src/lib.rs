@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serialport::SerialPortType;
 
 pub mod label;
+pub mod origin;
 pub mod scale;
 pub mod status;
 pub mod transport;
@@ -251,10 +252,31 @@ pub fn get_os_info() -> OsInfo {
     }
 }
 
+/// A `Command` that never flashes a console window. The desktop app is a GUI
+/// process, so without CREATE_NO_WINDOW every cmd/powershell/reg call it makes
+/// (e.g. the printer status monitor) pops up a terminal.
+pub fn hidden_command(program: &str) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 #[cfg(target_os = "windows")]
 fn windows_kernel_version() -> Option<(u32, u32, u32)> {
-    use std::process::Command;
-    let output = Command::new("cmd").args(["/c", "ver"]).output().ok()?;
+    // Doesn't change while running; status polls would otherwise spawn cmd every time.
+    static VERSION: std::sync::OnceLock<Option<(u32, u32, u32)>> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(detect_windows_kernel_version)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_kernel_version() -> Option<(u32, u32, u32)> {
+    let output = hidden_command("cmd").args(["/c", "ver"]).output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     // Expected: "Microsoft Windows [Version 10.0.19045.3803]"
     let start = text.find("[Version ")? + "[Version ".len();
@@ -271,22 +293,24 @@ fn windows_kernel_version() -> Option<(u32, u32, u32)> {
 /// PowerShell 2.0 ships with Windows 7; 5.1 with Windows 10/11.
 #[cfg(target_os = "windows")]
 pub fn powershell_major_version() -> u32 {
-    use std::process::Command;
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Write-Output $PSVersionTable.PSVersion.Major",
-        ])
-        .output();
-    match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0),
-        Err(_) => 0,
-    }
+    static VERSION: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let output = hidden_command("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Write-Output $PSVersionTable.PSVersion.Major",
+            ])
+            .output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -335,8 +359,7 @@ pub fn compatibility_report() -> String {
 
 #[cfg(target_os = "windows")]
 fn run_powershell(script: &str) -> Option<String> {
-    use std::process::Command;
-    let output = Command::new("powershell")
+    let output = hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .ok()?;
@@ -651,8 +674,6 @@ fn write_to_windows_printer(printer_name: &str, bytes: &[u8]) -> Result<(), Stri
 
 #[cfg(target_os = "windows")]
 fn winspool_raw_print(printer_name: &str, temp_file_path: &str) -> Result<(), String> {
-    use std::process::Command;
-
     // Use Windows Spooler API (winspool.drv) via PowerShell Add-Type P/Invoke
     // This is the correct way to send raw ESC/POS bytes to any Windows printer.
     // Add-Type works on PowerShell 2.0 (Windows 7) through 5.1/7.x.
@@ -707,7 +728,7 @@ Write-Output "OK: $written bytes sent to '{name}'";
         name = printer_name.replace('\'', "\\'")
     );
 
-    let output = Command::new("powershell")
+    let output = hidden_command("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
